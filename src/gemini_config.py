@@ -12,7 +12,7 @@ if config_file.exists():
     API_KEYS = config.get("API_KEYS", [])
     MODELS = config.get(
         "DEFAULT_MODELS",
-        ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"])
+        ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"])
     SINGLE_MODEL_FALLBACK = config.get("SINGLE_MODEL_FALLBACK")
     MAX_FABRICATION_RATE = config.get("MAX_FABRICATION_RATE", 0.10)
     BATCH_SIZE = config.get("BATCH_SIZE", 4)

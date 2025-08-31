@@ -1,4 +1,3 @@
-
 import time
 import random
 import json
@@ -9,7 +8,6 @@ import re
 from typing import List, Dict, Optional, Tuple, Any, Union
 from pathlib import Path
 import google.generativeai as genai
-from google.genai import types
 from src.gemini_config import API_KEYS, MODELS, BATCH_SIZE, MAX_RETRIES, CONTEXT_MAX_CHARS, VERIFIER_MODEL, VERIFIER_TEMPERATURE, MAX_OUTPUT_TOKENS
 
 # Add missing constants
@@ -30,17 +28,17 @@ def save_raw_response(response_obj: Any, model_name: str = "unknown_model", atte
     ts = int(time.time() * 1000)
     safe_name = model_name.replace("/", "_").replace("models_", "")
     path = f"raw/{ts}_{safe_name}_att{attempt}.resp.json"
-    
+
     try:
         with open(path, "w", encoding="utf8") as f:
-            # Handle the new google-genai response format
+            # Handle the google-generativeai response format
             if hasattr(response_obj, 'text'):
                 response_data = {
                     "text": response_obj.text,
                     "candidates": [],
                     "usage_metadata": {}
                 }
-                
+
                 # Extract candidates if available
                 if hasattr(response_obj, 'candidates') and response_obj.candidates:
                     for candidate in response_obj.candidates:
@@ -48,17 +46,17 @@ def save_raw_response(response_obj: Any, model_name: str = "unknown_model", atte
                             "content": {"parts": []},
                             "finish_reason": "UNKNOWN"
                         }
-                        
+
                         if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
                             for part in candidate.content.parts:
                                 if hasattr(part, 'text'):
                                     candidate_data["content"]["parts"].append({"text": part.text})
-                        
+
                         if hasattr(candidate, 'finish_reason'):
                             candidate_data["finish_reason"] = candidate.finish_reason.name if hasattr(candidate.finish_reason, 'name') else str(candidate.finish_reason)
-                        
+
                         response_data["candidates"].append(candidate_data)
-                
+
                 # Extract usage metadata if available
                 if hasattr(response_obj, 'usage_metadata'):
                     usage = response_obj.usage_metadata
@@ -69,7 +67,7 @@ def save_raw_response(response_obj: Any, model_name: str = "unknown_model", atte
                     }
             else:
                 response_data = {"error": "No text attribute", "raw": str(response_obj)}
-            
+
             json.dump(response_data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         # Fallback to plain text if JSON fails
@@ -96,8 +94,8 @@ def send_verify_request(model_name: str, api_key: str, prompt_text: str, max_tok
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name)
-        
-        generation_config = genai.types.GenerationConfig(
+
+        generation_config = genai.GenerationConfig(
             temperature=VERIFIER_TEMPERATURE,
             max_output_tokens=max_tokens,
         )
@@ -121,9 +119,9 @@ def send_verify_request(model_name: str, api_key: str, prompt_text: str, max_tok
                         raise ValueError(f"Response truncated due to MAX_TOKENS. Increase max_output_tokens. Raw saved to {raw_path}")
                     elif finish_reason_name in ["SAFETY", "OTHER"]:
                         raise ValueError(f"Response blocked due to {finish_reason_name}. Raw saved to {raw_path}")
-            
+
             raise NoTextPartsError(f"No text parts found in response. Raw saved to {raw_path}")
-        
+
         return response.text
 
     except Exception as e:
@@ -142,7 +140,7 @@ def find_json_bounds(text: str) -> Optional[str]:
     """Find first balanced JSON array or object in text"""
     if not text:
         return None
-    
+
     starts = [(m.start(), m.group()) for m in re.finditer(r'[\[\{]', text)]
     for start_index, start_char in starts:
         stack = []
@@ -210,28 +208,38 @@ def create_manual_review_item(candidate_id: str, claim: str, chunk_excerpt: str,
     }
 
     review_file = f"manual_review/{candidate_id}_{int(time.time())}.json"
+    os.makedirs("manual_review", exist_ok=True)
     with open(review_file, "w", encoding="utf-8") as f:
         json.dump(review_item, f, ensure_ascii=False, indent=2)
 
     logger.info(f"Created manual review item: {review_file}")
     return review_file
 
-# Strict verifier prompt
+# Updated verifier prompt to be more accurate
 VERIFIER_PROMPT = '''
-You are a strict JSON-only verifier. Respond with EXACTLY one JSON array containing verification objects and NOTHING else.
+You are a fact verification system. For each claim, check if it can be verified from the provided context excerpt.
 
-For each input item, determine if the claim can be VERIFIED from the context excerpt:
+STRICT RULES:
+1. If the claim's content appears in the context excerpt (even if paraphrased), respond with verdict="True"
+2. If the claim contradicts the context or cannot be found, respond with verdict="False" 
+3. For True verdicts: provide the exact reference text from context that supports the claim
+4. For False verdicts: use reference="UNKNOWN" and set suspected_fabrication=true
 
-1. If claim has exact/near-exact substring match in context: verdict="True", reference=exact matched text, explanation=brief quote justification, suspected_fabrication=false, confidence=0.90-1.00
-2. If context lacks evidence: verdict="False", reference="UNKNOWN", explanation=brief reason, suspected_fabrication=true, confidence=0.1-0.5
+Output ONLY a JSON array with these exact fields for each item:
+- id: string (copy from input)
+- language: string (copy from input) 
+- claim: string (copy from input)
+- context_chunk_id: number (copy from input)
+- context_excerpt: string (copy from input)
+- verdict: "True" or "False"
+- explanation: string (brief reasoning)
+- reference: string (exact text from context if True, "UNKNOWN" if False)
+- suspected_fabrication: boolean (false if True verdict, true if False verdict)
+- generator_model: "local"
+- raw_response_path: ""
+- meta: object with confidence field (0.9-1.0 for True, 0.1-0.5 for False)
 
-Rules:
-- Never invent references
-- Use exact verdict values "True" or "False"
-- Output array length must match input length
-- Each object must have: id, language, claim, context_chunk_id, context_excerpt, verdict, explanation, reference, suspected_fabrication, generator_model, raw_response_path, meta
-
-Return ONLY the JSON array:
+Respond with ONLY the JSON array, no other text:
 '''
 
 def prepare_verifier_request(items: List[Dict], max_tokens: int) -> str:
@@ -239,17 +247,17 @@ def prepare_verifier_request(items: List[Dict], max_tokens: int) -> str:
     return VERIFIER_PROMPT + "\n\nINPUT_ITEMS:\n" + json.dumps(items, ensure_ascii=False)
 
 def batch_verify(items: List[Dict]) -> List[Dict]:
-    """Batch verify items using new Google GenAI SDK"""
+    """Batch verify items using Google Generative AI SDK"""
     assert len(items) <= BATCH_SIZE, f"batch size must be <= {BATCH_SIZE}"
-    
+
     # Ensure truncation
     for item in items:
         item["context_excerpt"] = item.get("context_excerpt", "")[:CONTEXT_MAX_CHARS]
 
-    # Calculate tokens conservatively - increase max_tokens significantly
-    est_tokens_per_item = 400  # Increased estimate
-    max_tokens = min(MAX_OUTPUT_TOKENS * 2, est_tokens_per_item * max(1, len(items)))  # Double the limit
-    
+    # Calculate tokens conservatively
+    est_tokens_per_item = 600  # Increased estimate for Arabic text
+    max_tokens = min(MAX_OUTPUT_TOKENS * 3, est_tokens_per_item * max(1, len(items)))
+
     last_err = None
     last_raw_path = None
 
@@ -260,11 +268,11 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
         try:
             prompt_text = prepare_verifier_request(items, max_tokens)
             resp_text = send_verify_request(VERIFIER_MODEL, api_key, prompt_text, max_tokens, attempt)
-            
+
             parsed = robust_parse_json_array(resp_text)
             if parsed is None:
                 raise ValueError("Failed to parse JSON response")
-            
+
             if len(parsed) != len(items):
                 if isinstance(parsed, list) and len(parsed) == 1 and len(items) == 1:
                     # Single item case
@@ -279,24 +287,25 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
                 result.setdefault("raw_response_path", save_raw_response(resp_text, VERIFIER_MODEL, attempt))
                 result.setdefault("generator_model", VERIFIER_MODEL)
                 result.setdefault("meta", {}).setdefault("confidence", 0.5)
-            
+
             return parsed
 
         except Exception as e:
             last_err = e
             logger.error(f"Verification failed with key {key_index}, attempt {attempt}: {str(e)}")
-            
-            # Create manual review items
-            for item in items:
-                create_manual_review_item(
-                    item.get("id", "unknown"),
-                    item.get("claim", ""),
-                    item.get("context_excerpt", ""),
-                    last_raw_path or "unknown",
-                    VERIFIER_MODEL,
-                    key_index,
-                    f"Attempt {attempt}: {str(e)}"
-                )
+
+            # Create manual review items for persistent failures
+            if attempt == MAX_RETRIES:
+                for item in items:
+                    create_manual_review_item(
+                        item.get("id", "unknown"),
+                        item.get("claim", ""),
+                        item.get("context_excerpt", ""),
+                        last_raw_path or "unknown",
+                        VERIFIER_MODEL,
+                        key_index,
+                        f"Attempt {attempt}: {str(e)}"
+                    )
 
             if attempt < MAX_RETRIES:
                 wait_time = backoff_with_jitter(attempt)
@@ -343,54 +352,50 @@ class GeminiClient:
         self.lock = threading.Lock()
         self.api_keys = API_KEYS
         self.current_key_index = 0
-        self.key_states = {i: {"blocked_until": 0.0, "requests_made": 0}
+        self.key_states = {i: {"blocked_until": 0, "requests_made": 0}
                           for i in range(len(self.api_keys))}
         Path("raw").mkdir(exist_ok=True)
 
     def _get_next_available_key(self) -> Tuple[Optional[str], int]:
         """Get next available API key"""
         with self.lock:
-            current_time = time.time()
-            
+            current_time = int(time.time())
+
             for i in range(len(self.api_keys)):
                 next_index = (self.current_key_index + i) % len(self.api_keys)
                 if self.key_states[next_index]["blocked_until"] <= current_time:
                     self.current_key_index = next_index
                     return self.api_keys[next_index], next_index
-            
+
             return None, -1
 
     def _block_key(self, key_index: int, duration: int = 300):
         """Block a key for specified duration"""
         with self.lock:
-            self.key_states[key_index]["blocked_until"] = int(time.time() + duration)
+            self.key_states[key_index]["blocked_until"] = int(time.time()) + duration
             self.logger.warning(f"Blocked key {key_index} for {duration}s")
 
     def call_model(self, prompt: str, model: str = "gemini-1.5-flash", max_tokens: int = 8192,
                    temperature: float = 0.0, max_attempts: int = 3) -> Dict:
         """Call Gemini model using Google Generative AI SDK"""
-        
-        # Use available models
-        supported_models = [
-            "gemini-1.5-flash", 
-            "gemini-1.5-pro", 
-            "gemini-pro"
-        ]
-        if model not in supported_models:
-            self.logger.warning(f"Model {model} not in supported list, using gemini-1.5-flash")
-            model = "gemini-1.5-flash"
-        
+
+        # Use available models from config
+        available_models = MODELS + ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+        if model not in available_models:
+            self.logger.warning(f"Model {model} not in available list, using first available model")
+            model = available_models[0]
+
         for attempt in range(max_attempts):
             key, key_index = self._get_next_available_key()
-            
+
             if key is None:
                 return {"success": False, "error": "No API keys available", "raw_text": ""}
 
             try:
                 genai.configure(api_key=key)
                 model_instance = genai.GenerativeModel(model)
-                
-                generation_config = genai.types.GenerationConfig(
+
+                generation_config = genai.GenerationConfig(
                     temperature=temperature,
                     max_output_tokens=max_tokens,
                 )
@@ -420,16 +425,16 @@ class GeminiClient:
 
             except Exception as e:
                 self.logger.error(f"Error with key {key_index}, attempt {attempt + 1}: {e}")
-                
+
                 # Handle different error types
                 error_str = str(e).lower()
-                if "quota" in error_str or "exhausted" in error_str:
-                    self._block_key(key_index, 300)  # Block for 5 minutes
+                if "quota" in error_str or "exhausted" in error_str or "429" in error_str:
+                    self._block_key(key_index, 600)  # Block for 10 minutes
                 elif "rate" in error_str or "limit" in error_str:
-                    self._block_key(key_index, 60)   # Block for 1 minute
+                    self._block_key(key_index, 120)   # Block for 2 minutes
                 elif "safety" in error_str:
                     self.logger.warning(f"Safety filter triggered for model {model}")
-                
+
                 if attempt < max_attempts - 1:
                     wait_time = backoff_with_jitter(attempt)
                     time.sleep(wait_time)
@@ -438,68 +443,10 @@ class GeminiClient:
 
         return {"success": False, "error": "Max attempts exceeded", "raw_text": ""}
 
-    def generate_with_thinking(self, prompt: str, model: str = "models/gemini-2.5-flash", 
-                              disable_thinking: bool = False) -> Dict:
-        """Generate content with optional thinking mode (for 2.5 models)"""
-        
-        config_params = {
-            "temperature": 0.0,
-            "max_output_tokens": 8192,
-        }
-        
-        # Disable thinking for 2.5 models if requested
-        if "2.5" in model and disable_thinking:
-            config_params["thinking_config"] = types.ThinkingConfig(
-                thinking_budget=0  # This disables thinking as per documentation
-            )
-        
-        return self.call_model(prompt, model, **config_params)
-
-    def generate_structured_output(self, prompt: str, response_schema: Any, 
-                                 model: str = "models/gemini-2.0-flash") -> Dict:
-        """Generate structured output using pydantic schemas"""
-        key, key_index = self._get_next_available_key()
-        
-        if key is None:
-            return {"success": False, "error": "No API keys available", "raw_text": ""}
-
-        try:
-            client = genai.Client(api_key=key)
-            
-            config = types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=response_schema,
-                temperature=0.0,
-                max_output_tokens=8192
-            )
-
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=config
-            )
-
-            # Check if response was parsed automatically
-            parsed_data = None
-            if hasattr(response, 'parsed') and response.parsed:
-                parsed_data = response.parsed
-
-            return {
-                "success": True,
-                "raw_text": response.text if hasattr(response, 'text') else "",
-                "parsed": parsed_data,
-                "model": model,
-                "key_index": key_index
-            }
-
-        except Exception as e:
-            self.logger.error(f"Structured generation failed: {e}")
-            return {"success": False, "error": str(e), "raw_text": ""}
-
     def get_key_status(self) -> Dict:
         """Get status of all API keys"""
         with self.lock:
-            current_time = time.time()
+            current_time = int(time.time())
             status = {}
             for i, key in enumerate(self.api_keys):
                 masked_key = key[:8] + "..." + key[-4:] if len(key) > 12 else "***"
