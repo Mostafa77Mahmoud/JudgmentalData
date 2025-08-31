@@ -1,0 +1,45 @@
+class GenerativeModel(
+    model_name: str = "gemini-1.5-flash-002",
+    safety_settings: Unknown | None = None,
+    generation_config: GenerationConfigType | None = None,
+    tools: FunctionLibraryType | None = None,
+    tool_config: ToolConfigType | None = None,
+    system_instruction: ContentType | None = None
+)
+The genai.GenerativeModel class wraps default parameters for calls to GenerativeModel.generate_content, GenerativeModel.count_tokens, and GenerativeModel.start_chat.
+
+This family of functionality is designed to support multi-turn conversations, and multimodal requests. What media-types are supported for input and output is model-dependant.
+
+>>> import google.generativeai as genai
+>>> import PIL.Image
+>>> genai.configure(api_key='YOUR_API_KEY')
+>>> model = genai.GenerativeModel('models/gemini-1.5-flash')
+>>> result = model.generate_content('Tell me a story about a magic backpack')
+>>> result.text
+"In the quaint little town of Lakeside, there lived a young girl named Lily..."
+Multimodal input:
+
+>>> model = genai.GenerativeModel('models/gemini-1.5-flash')
+>>> result = model.generate_content([
+...     "Give me a recipe for these:", PIL.Image.open('scones.jpeg')])
+>>> result.text
+"**Blueberry Scones** ..."
+Multi-turn conversation:
+
+>>> chat = model.start_chat()
+>>> response = chat.send_message("Hi, I have some questions for you.")
+>>> response.text
+"Sure, I'll do my best to answer your questions..."
+To list the compatible model names use:
+
+>>> for m in genai.list_models():
+...     if 'generateContent' in m.supported_generation_methods:
+...         print(m.name)
+Arguments:
+model_name: The name of the model to query. To list compatible models use
+safety_settings: Sets the default safety filters. This controls which content is blocked
+by the api before being returned.
+generation_config: A genai.GenerationConfig setting the default generation parameters to
+use.
+
+"GenerativeModel" is not exported from module "google.generativeai" (pyright-extended)
