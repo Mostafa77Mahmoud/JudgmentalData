@@ -1,0 +1,222 @@
+1 — الفكرة العامة (what we want)
+
+نريد أمثلة بصيغة JSON موحدة، كل مثال:
+
+claim (ادعاء واحد واضح)
+
+label: True / False / Unknown
+
+evidence: مقتطف نصي من ملفات attached_assets مع مسار الملف وموقع الاقتباس (char indices) — إجباريا أن يكون مصدر الدليل داخل attached_assets.
+
+explanation: سبب الحكم (عربي للعربي، إنجليزي للإنجليزي)، صارم، موجز (حد كلمات).
+
+confidence: رقم 0.0–1.0 يعبّر عن درجة اليقين.
+
+generation_meta: أي بيانات عن طريقة التوليد (prompt_version, generator_model, seed_id).
+
+raw_response_path: مسار الملف لرد النموذج الأصلي (لو وُجد).
+
+must_not_hallucinate: لو النموذج لم يجد دليلًا حقيقيًا يجب أن يرفض وألا يخترع.
+
+2 — قواعد صارمة لمَنع الاختلاق (no-hallucination rules)
+
+لا تُستشهد بأي مصدر خارج attached_assets. اكتب صريحًا: “Only use files under attached_assets/ — do not invent external citations.”*
+
+إذا لم يوجد اقتباس حرفي أو شبه حرفي في attached_assets → لا تصنع مرجع؛ إما: label = Unknown و explanation = "No supporting evidence in attached_assets."، أو رفض إنتاج المثال.
+
+كل evidence يجب أن يحتوي على: { file_path, excerpt, start_char, end_char, match_type } حيث match_type ∈ {exact, paraphrase, inferred}. إذا inferred يجب أن تضع ملاحظة توضيحية قوية ولمدة مراجعة بشرية.
+
+لا تكتب أي حقل حر خارج JSON (output must be JSON only).
+
+إجبار النموذج على إظهار مقتطف قصير (≤ 750 حرف) فقط كـ evidence_excerpt — لا ترسل الملف كاملًا.
+
+3 — JSON schema (صارم — اعمل عليه validate قبلاً)
+{
+  "id": "string (uuid)",
+  "language": "ar|en",
+  "claim": "string",
+  "label": "True|False|Unknown",
+  "explanation": "string (max 60 words)",
+  "confidence": 0.0,
+  "evidence": {
+    "file_path": "attached_assets/....txt or .pdf (exact file name)",
+    "excerpt": "string (≤ 750 chars)",
+    "start_char": 123,
+    "end_char": 456,
+    "match_type": "exact|paraphrase|inferred"
+  },
+  "reference": "the canonical citation (e.g., file: page/section)",
+  "generator_meta": {
+    "generator_model": "string",
+    "prompt_version": "v1",
+    "seed_id": "seed_42"
+  },
+  "raw_response_path": "path/to/raw/resp.json (optional)",
+  "suspected_fabrication": false,
+  "needs_manual_review": false
+}
+
+4 — معايير تقييم محلي (local verification heuristics)
+
+Exact substring: لو excerpt يظهر حرفياً في الملف → exact → accepted.
+
+Token overlap (نصية): normalized token overlap ≥ 0.85 → accept as strong match.
+
+Semantic (embedding) similarity: إذا استخدمت embeddings: sim ≥ 0.72 → accept as paraphrase; 0.6–0.72 → soft accept (needs_manual_review).
+
+If evidence missing → label := Unknown و suspected_fabrication = true و needs_manual_review = true.
+
+Target fabrication rate: ≤ 10% (تستثني needs_manual_review من المقياس الأولي).
+
+5 — استراتيجية توليد السيناريوهات (diversity & balance)
+
+لكل أصل مرجعي (file/section) أنتج:
+
+N_true_exact: أمثلة صحيحة مع اقتباس حرفي (25%)
+
+N_true_paraphrase: صحيحة لكن بصياغة مختلفة (15%)
+
+N_false_out_of_context: اقتباس صحيح لكن الادعاء يخرج المعنى (25%)
+
+N_false_fabricated: ادعاء لا يدعمه المصدر (20%) — ولكن ضع needs_manual_review=true و لا تدخلها كـ fabricated نهائية قبل المراجعة.
+
+N_subtle: ادعاءات قابلة للاختلاف (Ambiguous) → label Unknown (15%)
+
+نسبة أمثلة تدريبية الأولى: 50% عربي / 50% إنجليزي (أو حسب توزيعك).
+
+لكل مثال ضع difficulty tag: easy/medium/hard (مستند لوجود exact match أو paraphrase أو inference).
+
+6 — سياسات الطلَب لتقليل عدد الRequests و كمية المخرجات
+
+Batch per call: اطلب من النموذج إنتاج دفعة (batch) من 10–50 أمثلة في رد واحد بدل رد واحد لكل مثال، مع تحديد max_output_tokens بعناية (مثلاً 2000–8000 حسب حجم batch).
+
+Limit the excerpt length: excerpt ≤ 750 chars.
+
+شرح مختصر: explanation ≤ 60 كلمات.
+
+Structured-only: JSON array فقط، لا تعليق، no markdown.
+
+إنفاذ استخدام attached_assets: جملة صريحة في البرومبت تطلب أن تُشير إلى الملف وموضع الاقتباس.
+
+7 — برومبت جاهز (Arabic — صارم)
+
+استعمل هذا النص تمامًا كـ system/user prompt عند التوليد. حط المتغيرات حسب عدد الأمثلة واللغة:
+
+SYSTEM:
+You are a careful data-generation assistant. Only use the files in the folder "attached_assets" as evidence. Do NOT use or invent any external sources. Output must be valid JSON (UTF-8). No surrounding text.
+
+USER:
+Language: Arabic
+Task: Produce a JSON array of exactly {BATCH_SIZE} items. Each item must follow the schema below. For each item, find real evidence inside files under attached_assets. If you cannot find any supporting evidence inside attached_assets for the claim, then label the item as "Unknown" and set "suspected_fabrication": true and "needs_manual_review": true. Do NOT fabricate any references or quotes.
+
+JSON schema (strict) required per item:
+{
+ "id": "<uuid>",
+ "language": "ar",
+ "claim": "<Arabic claim: 1-2 sentences>",
+ "label": "True|False|Unknown",
+ "explanation": "<Arabic, max 60 words> (state concisely why the claim is True/False/Unknown; if Unknown, say 'No evidence found in attached_assets')",
+ "confidence": "<float between 0.0 and 1.0>",
+ "evidence": {
+   "file_path": "attached_assets/<exact file name>",
+   "excerpt": "<the exact excerpt or paraphrase from that file, max 750 chars>",
+   "start_char": <integer>,
+   "end_char": <integer>,
+   "match_type": "exact|paraphrase|inferred"
+ },
+ "reference": "<short citation: file name and section or page>",
+ "generator_meta": {"generator_model":"<string>","prompt_version":"v1","seed_id":"<seed>"},
+ "raw_response_path": "",
+ "suspected_fabrication": false,
+ "needs_manual_review": false
+}
+
+Generation rules:
+- Exactly {N_TRUE} items must be labeled True (mix of exact and paraphrase).
+- Exactly {N_FALSE} items must be labeled False (mix of out_of_context and fabricated).
+- Exactly {N_UNKNOWN} items must be labeled Unknown.
+- Provide balanced difficulty levels: approx 30% easy (exact match), 40% medium (paraphrase/semantic), 30% hard (subtle/inferred).
+- For every evidence, include accurate start_char and end_char positions relative to the file contents.
+- excerpt must be verbatim from the file for match_type "exact". For "paraphrase" include a short paraphrase and set match_type accordingly.
+- Keep each explanation concise and in Arabic. Use no extra commentary.
+
+Output: a single JSON array only. No extra text.
+
+8 — برومبت جاهز (English — strict)
+SYSTEM:
+You are a careful data-generation assistant. Only use files under "attached_assets" as evidence. Do NOT invent external sources. Output must be valid JSON only.
+
+USER:
+Language: English
+Produce a JSON array of exactly {BATCH_SIZE} items. Each item must follow the schema below. If you cannot find supporting evidence inside attached_assets for a claim, label it "Unknown" and set "suspected_fabrication": true and "needs_manual_review": true. Do NOT fabricate references or quotes.
+
+[Insert same JSON schema as above but with language:"en" and English explanations]
+
+Generation rules:
+- {N_TRUE} True items, {N_FALSE} False items, {N_UNKNOWN} Unknown items.
+- Balanced difficulty: ~30% easy (exact), 40% medium (paraphrase/semantic), 30% hard (inference).
+- evidence.excerpt ≤ 750 chars; for exact matches it must be verbatim.
+- Include start_char/end_char (character offsets in the referenced file).
+- Keep explanation concise (≤ 60 words).
+- Return one JSON array only.
+
+
+ملحوظة مهمة: استبدل {BATCH_SIZE}, {N_TRUE}, {N_FALSE}, {N_UNKNOWN} بالقيم اللي تريدها قبل الإرسال للنموذج.
+
+9 — مثال لعنصر ناتج صحيح (sample output)
+{
+  "id": "aa7ab4fb-925a-4c16-a0cd-f9381fd04c91",
+  "language": "ar",
+  "claim": "لا يجوز اشتراط زيادة نقدية على القرض بحيث تتحول إلى ربا.",
+  "label": "True",
+  "explanation": "النص في الصفحة 12 يذكر صراحة تحريم اشتراط الزيادة على القرض لما يثبت ربا؛ يوجد عبارة صريحة تدعم ذلك.",
+  "confidence": 0.95,
+  "evidence": {
+    "file_path": "attached_assets/sharia_standard_loan.txt",
+    "excerpt": "مستند تحريم اشتراط الزيادة في بدل القرض للمقرض... الأدلة من الكتاب والسنة والإجماع...",
+    "start_char": 1200,
+    "end_char": 1380,
+    "match_type": "exact"
+  },
+  "reference": "sharia_standard_loan.txt — section 4",
+  "generator_meta": {"generator_model":"gemini-2.5-pro","prompt_version":"v1","seed_id":"seed_1"},
+  "raw_response_path": "raw/gen_aa7ab4fb_resp.json",
+  "suspected_fabrication": false,
+  "needs_manual_review": false
+}
+
+10 — خطوات التحقق المحلي (post-generation pipeline)
+
+Parse JSON with parse_json_loose (تحسينات عندك).
+
+Check schema (required fields + types).
+
+Verify evidence:
+
+Load file file_path from attached_assets.
+
+Confirm start_char/end_char indices match excerpt.
+
+If match_type == exact then the excerpt must be identical to substring at those indices.
+
+Compute normalized token_overlap and (optional) embedding similarity.
+
+Auto-set flags:
+
+If exact → suspected_fabrication=false.
+
+If paraphrase & overlap >=0.72 → suspected_fabrication=false.
+
+If inference or missing evidence → suspected_fabrication=true & needs_manual_review=true.
+
+Aggregate metrics: report fabricated_count, manual_review_count, true_count, false_count, unknown_count, fabrication_rate = fabricated/(total - manual_review).
+
+11 — نصائح تنفيذية (practical)
+
+احفظ كل الـ raw responses في raw/ مع اسم ملف مرجع (raw_response_path) عشان لو احتجت تحقق لاحق.
+
+اطلب من النموذج أن يخرج batch واحد كبير بدل ن-نداءات صغيرة لتقليل الــ requests. لكن راقب token limits: لو batch كبير زود max_output_tokens.
+
+لو تستخدم Gemini: استخدم max_output_tokens معقول (مثلاً 4000) واطلب batch ≤ 20–50 حسب طول كل مثال.
+
+فعل local verification أولاً (exact substring) قبل أي مقارنة مع النموذج. اجعل needs_manual_review واسعًا عند الغموض.
