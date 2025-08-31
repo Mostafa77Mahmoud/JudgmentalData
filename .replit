@@ -23,4 +23,8 @@ mode = "sequential"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
+args = "pip install -e ."
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
 args = "streamlit run app.py --server.address=0.0.0.0 --server.port=5000"
