@@ -1,0 +1,229 @@
+Gemini 2.5 Pro is our state-of-the-art thinking model, capable of reasoning over complex problems in code, math, and STEM, as well as analyzing large datasets, codebases, and documents using long context.
+
+Try in Google AI Studio
+
+Model details
+Property	Description
+Model code	gemini-2.5-pro
+Supported data types
+Inputs
+
+Audio, images, video, text, and PDF
+
+Output
+
+Text
+
+Token limits[*]
+Input token limit
+
+1,048,576
+
+Output token limit
+
+65,536
+
+Capabilities
+Structured outputs
+
+Supported
+
+Caching
+
+Supported
+
+Function calling
+
+Supported
+
+Code execution
+
+Supported
+
+Search grounding
+
+Supported
+
+Image generation
+
+Not supported
+
+Audio generation
+
+Not supported
+
+Live API
+
+Not supported
+
+Thinking
+
+Supported
+
+Batch Mode
+
+Supported
+
+URL Context
+
+Supported
+
+Versions	
+Read the model version patterns for more details.
+Stable: gemini-2.5-pro
+Latest update	June 2025
+Knowledge cutoff	January 2025
+Gemini 2.5 Flash
+Our best model in terms of price-performance, offering well-rounded capabilities. 2.5 Flash is best for large scale processing, low-latency, high volume tasks that require thinking, and agentic use cases.
+
+Try in Google AI Studio
+
+Model details
+Property	Description
+Model code	models/gemini-2.5-flash
+Supported data types
+Inputs
+
+Text, images, video, audio
+
+Output
+
+Text
+
+Token limits[*]
+Input token limit
+
+1,048,576
+
+Output token limit
+
+65,536
+
+Capabilities
+Audio generation
+
+Not supported
+
+Caching
+
+Supported
+
+Code execution
+
+Supported
+
+Function calling
+
+Supported
+
+Image generation
+
+Not supported
+
+Search grounding
+
+Supported
+
+Structured outputs
+
+Supported
+
+Thinking
+
+Supported
+
+Batch Mode
+
+Supported
+
+URL Context
+
+Supported
+
+Versions	
+Read the model version patterns for more details.
+Stable: gemini-2.5-flash
+Preview: gemini-2.5-flash-preview-05-20
+Latest update	June 2025
+Knowledge cutoff	January 2025
+Gemini 2.5 Flash-Lite
+A Gemini 2.5 Flash model optimized for cost-efficiency and high throughput.
+
+Try in Google AI Studio
+
+Model details
+Property	Description
+Model code	models/gemini-2.5-flash-lite
+Supported data types
+Inputs
+
+Text, image, video, audio, PDF
+
+Output
+
+Text
+
+Token limits[*]
+Input token limit
+
+1,048,576
+
+Output token limit
+
+65,536
+
+Capabilities
+Structured outputs
+
+Supported
+
+Caching
+
+Supported
+
+Function calling
+
+Supported
+
+Code execution
+
+Supported
+
+URL Context
+
+Supported
+
+Search grounding
+
+Supported
+
+Image generation
+
+Not supported
+
+Audio generation
+
+Not supported
+
+Live API
+
+Not supported
+
+Thinking
+
+Supported
+
+Batch mode
+
+Supported
+
+URL Context
+
+Supported
+
+Versions	
+Read the model version patterns for more details.
+Stable: gemini-2.5-flash-lite
+Preview: gemini-2.5-flash-lite-06-17
+Latest update	July 2025
+Knowledge cutoff	January 2025

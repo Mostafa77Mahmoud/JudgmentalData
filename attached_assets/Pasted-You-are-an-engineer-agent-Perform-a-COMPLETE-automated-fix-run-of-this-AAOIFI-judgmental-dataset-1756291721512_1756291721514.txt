@@ -1,0 +1,290 @@
+You are an engineer agent. Perform a COMPLETE, automated fix & run of this AAOIFI judgmental dataset pipeline. Use the repository already in this Replit session. Do the edits, add/replace code, run smoke tests and start generation as described below, and produce a short final run report & location of outputs.
+
+High-level goals
+
+Use inputs/ assets:
+
+inputs/arabic_chunks.json (primary context)
+
+inputs/english_chunks.json
+
+inputs/arabic_cleaned.txt (fallback only)
+
+inputs/english_cleaned.txt (fallback only)
+
+inputs/arabic_qa_pairs.json (seed claims)
+
+inputs/english_qa_pairs.json (seed claims)
+
+Generate judgmental dataset:
+
+Arabic first: target 2000 verified examples (True/False)
+
+Then English: target 2000 verified examples
+
+Balanced: ~50% True / 50% False (tolerance ±3%).
+
+Strict reference verification: references must match chunk verbatim (or fallback to full text search). If no reliable reference, set reference: "UNKNOWN" and suspected_fabrication: true.
+
+Use models: gemini-2.5-pro (primary verification), gemini-2.5-flash (generation), gemini-2.5-flash-lite (augmentation/paraphrase). Implement key rotation/fallback to avoid quota issues.
+
+Batch outputs: ask model to return a JSON array of examples per request (not single object per request). Default batch_size = 8 for smoke, 12 after tests if tokens allow.
+
+Save raw response text for every request (in raw/) before parsing.
+
+API keys (use these for key rotation)
+Use them exactly as environment variables or in the gemini client rotation mechanism:
+
+AIzaSyAspAo_UHjOCKxbmtaPCtldZ7g6XowHoV4
+
+AIzaSyCLfpievRZO_J_Ryme_1-1T4SjVBOPCfjI
+
+AIzaSyAIPk1An1O6sZiro64Q4R9PjVrqvPkSVvQ
+
+AIzaSyBbidR_bEfiMrhOufE4PAHrYEBvuPuqakg
+
+Concrete tasks to perform (do these in order)
+
+A. Prepare configuration & environment
+
+Create/update config/keys.json with the four keys and models list:
+
+{
+  "keys": [
+    "AIzaSyAspAo_UHjOCKxbmtaPCtldZ7g6XowHoV4",
+    "AIzaSyCLfpievRZO_J_Ryme_1-1T4SjVBOPCfjI",
+    "AIzaSyAIPk1An1O6sZiro64Q4R9PjVrqvPkSVvQ",
+    "AIzaSyBbidR_bEfiMrhOufE4PAHrYEBvuPuqakg"
+  ],
+  "models": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"],
+  "per_key_rate_limit_per_min": 12,
+  "concurrency_per_key": 2
+}
+
+
+Ensure inputs/ files exist. If missing, fail gracefully and report which files are missing.
+
+B. Edit or create src/gemini_client.py — implement robust key rotation, per-key rate limiting, exponential backoff, and save raw responses.
+
+Important behavior to implement:
+
+Round-robin key usage with per-key counters and a blocked_until time when a key receives 429 or RESOURCE_EXHAUSTED. When blocked, skip until blocked_until.
+
+On 429 or RESOURCE_EXHAUSTED use retry-after or server-provided retryDelay if available; otherwise block key for 300s.
+
+Save every HTTP response r.text to raw/{timestamp}_{keyidx}_{model}.resp.txt immediately.
+
+Function signature: def call_model(model_name: str, prompt: str, max_tokens: int, key_rotation=True) -> dict returns dict with fields {success, http_status, model, key_index, raw_text, latency_seconds}.
+
+Limit concurrent requests: use a simple thread pool or async with semaphore sized sum(concurrency_per_key).
+
+C. Edit or create src/parse_utils.py with robust parsing functions:
+
+def clean_model_output(text: str) -> str — strip markdown fences (```), drop any trailing non-JSON chars, trim.
+
+def parse_json_loose(text: str) -> Optional[Any] — attempt json.loads; if fails, extract first JSON array/object using regex (\[.*\]|\{.*\}) with DOTALL and attempt to fix unbalanced braces by trimming trailing chars until parseable. Return Python object or None.
+
+def compute_token_overlap(a: str, b: str) -> float — normalize (lower, remove punctuation, collapse whitespace), return |intersection(tokens_a, tokens_b)| / len(tokens_a). This will be used to validate references; acceptance threshold = 0.75.
+
+D. Edit src/dataset_generator.py — implement batched generation, seed usage, perturbation generation, verification stage and saving.
+
+Key behaviors:
+
+Seed ingestion: read inputs/arabic_qa_pairs.json and inputs/english_qa_pairs.json. For each QA seed, construct a claim (paraphrase question→claim or answer→claim) and associate a chunk via chunk_id in the seed if available; else do a chunk search (exact substring or small fuzzy match) to pick the most likely chunk.
+
+Primary context: always use inputs/*_chunks.json to provide chunk excerpt to model. Only if the chunk does not contain required reference verbatim, use *_cleaned.txt as fallback to search for the reference (but prefer chunk).
+
+Perturbations: for each seed produce 1-2 false variants via small rules (wrong number, polarity flip, date shift, context-shift). Use existing _generate_perturbations logic but ensure it produces at most 2 perturbs per claim.
+
+Batching:
+
+For Smoke test: batch_size = 8.
+
+For Full generation: batch_size = 12 (only if max_output_tokens/tokens permit; otherwise reduce).
+
+Request format: prompt must ask for ONE JSON ARRAY of N objects in specified schema.
+
+Prompt templates: replace current single-object prompts with batch JSON-array prompts. Use the exact templates provided below (Arabic + English).
+
+Two-stage flow per batch:
+
+Stage 1 (generation): use gemini-2.5-flash or flash-lite to produce candidate array of examples (both True and False), but prefer generating seeds+perturbations rather than verifying references.
+
+Stage 2 (verification): for each candidate with a claimed reference (or none), call gemini-2.5-pro with a verification prompt to verify the claim against the specific chunk (use just that chunk). If pro returns verdict: True and reference appears verbatim in chunk and token_overlap(reference, chunk) >= 0.75, accept. Otherwise set verdict: False, reference: "UNKNOWN", suspected_fabrication: true OR re-run verification with pro using full text fallback.
+
+Save accepted examples to data/generation_stage_B/ar/judgmental_ar_final.jsonl and similar for English. Each line must be a JSON object matching schema:
+
+{
+  "id": "<uuid>",
+  "language": "ar"|"en",
+  "instruction": "<fixed instruction>",
+  "input": "Claim: ...\nContext: chunk_id: X ...",
+  "output": "VERDICT: True/False\nExplanation: ...\nReference: ...",
+  "meta": {...}
+}
+
+
+Also save the raw model outputs to raw/ and a parsed record to data/judgmental_parsed_raw.jsonl for debugging.
+
+E. Prompt templates — use these EXACT prompts (no backticks, instruct model to return JSON array only):
+
+Arabic batch prompt (use for generation stage):
+
+You are an AAOIFI Shari'ah verification expert. DO NOT INVENT REFERENCES.
+
+TASK: For each seed claim provided, generate one verification candidate (True or False). RETURN EXACTLY one JSON ARRAY of objects. Do NOT output prose or markdown. Each object must contain:
+- id (uuid string)
+- language: "ar"
+- claim (the seed claim)
+- context_chunk_id (int)
+- context_excerpt (≤512 chars)
+- verdict: "True" or "False"
+- explanation: short quote-based evidence (≤120 chars) if True; if False, write a concise reason why it is False
+- reference: the exact substring from the chunk that supports your verdict OR "UNKNOWN"
+- suspected_fabrication: boolean
+- generator_model: name of model used
+- meta: {"confidence": <0-1>, "seed_id": "<seed>"}
+
+RULES:
+1) If the chunk contains a verbatim reference for the claim, verdict must be "True" and reference must match substring from the chunk.
+2) If not verifiable in chunk, set reference:"UNKNOWN" and suspected_fabrication:true and verdict:"False".
+3) Do not invent clause numbers or made-up references.
+4) Temperature=0.0. Output exactly N objects (N=batch_size).
+
+INPUT: JSON object with fields:
+{"seeds":[ {"seed_id": "...", "claim":"..." }, ... ], "chunks":[ {"chunk_id":X,"text":"..."}, ... ], "batch_size": <int> }
+
+
+English batch prompt: identical but language: "en" and English wording. Use the same rules.
+
+Verification prompt (use with gemini-2.5-pro for one candidate at a time):
+
+You are an AAOIFI verifier. DO NOT INVENT REFERENCES.
+
+Check the following single claim strictly against the provided chunk text. Return EXACTLY one JSON object including:
+- verdict: "True" or "False"
+- explanation: a short quote from the chunk if True (≤120 chars)
+- reference: the exact substring from the chunk OR "UNKNOWN"
+- suspected_fabrication: boolean
+- confidence: 0-1
+
+INPUT:
+{"claim":"...", "chunk_id":X, "chunk_text":"..."}
+Rules:
+- If the chunk contains a verbatim match that supports the claim, set verdict:"True" and reference to the exact substring.
+- Else set verdict:"False", reference:"UNKNOWN", suspected_fabrication:true.
+- DO NOT invent numbers, dates, or standard names.
+- Temperature=0.0
+
+
+F. Parsing & Validation
+
+After each batch response, save the raw text to raw/{timestamp}_{model}_{keyidx}.resp.txt.
+
+Parse with parse_json_loose. If parsed object is a list, iterate objects. If the model returned incomplete JSON array, attempt the trimming strategy in parse_json_loose.
+
+Validate each parsed object with schema validator (fields present, verdict in {"True","False"}, language in {"ar","en"}, suspected_fabrication is bool).
+
+If invalid, mark candidate as failed and log raw response.
+
+G. Reference check
+
+If reference != "UNKNOWN", compute overlap = token_overlap(reference, chunk_text). Accept only if overlap >= 0.75.
+
+If accepted, set meta.confidence = average of model confidence and overlap (clamped).
+
+If not accepted, set reference:"UNKNOWN", suspected_fabrication:true, and re-verify with pro once more using full arabic_cleaned.txt as fallback to search. If still no match, keep as False/UNKNOWN.
+
+H. Storage & splitting
+
+Keep accepted examples in data/generation_stage_B/ar/judgmental_ar_final.jsonl
+
+After every 50 accepted examples, run split creation:
+
+train (80%), val (10%), test (10%) saved to data/generation_stage_B/ar/.
+
+Do same for English under data/generation_stage_B/en/.
+
+I. Smoke test & run commands
+
+Run smoke test for Arabic:
+
+python -m src.dataset_generator --lang ar --mode smoke --batch_size 8 --smoke_total 20
+
+The generator must output at least 20 parsed/validated examples (or report why it failed).
+
+Inspect results: ls -l data/generation_stage_B/ar/ and head -n 5 data/generation_stage_B/ar/judgmental_ar_final.jsonl.
+
+If smoke is healthy, run full Arabic:
+
+python -m src.dataset_generator --lang ar --mode full --target 2000 --batch_size 12
+
+After Arabic completes, run English same way:
+
+python -m src.dataset_generator --lang en --mode full --target 2000 --batch_size 12
+
+J. Quota & model usage policy to implement
+
+Primary verification: use gemini-2.5-pro.
+
+Heavy generation: use gemini-2.5-flash.
+
+Paraphrase/augmentation: gemini-2.5-flash-lite.
+
+Use key rotation: round-robin keys but respect blocked_until.
+
+Implement per-key rate limiting (12 req/min). Sleep/backoff on 429 using Retry-After or retryDelay from the API error details. If all keys blocked, wait until the earliest blocked_until.
+
+Limit concurrent requests across keys to concurrency_total = keys_count * concurrency_per_key (configured above).
+
+K. Extra housekeeping
+
+Remove obsolete or duplicate JSON files older than 30 days in raw/ and data/ into archive/ts-<date>/ but do not delete inputs/. Only archive duplicate temp files *.tmp, *.bak, *.old, and any *.jsonl in root that are not the canonical outputs. Save an archive/manifest.json.
+
+Ensure repository logging to logs/pipeline_run_<timestamp>.log.
+
+L. Final validation & Alpaca conversion
+
+After each language generation completes, run conversion: python -m src.convert_to_alpaca --input data/generation_stage_B/ar/judgmental_ar_final.jsonl --out output/alpaca/judgmental_alpaca_ar.jsonl
+
+Also produce metadata.json with totals, language distribution, verdict counts, suspected_fabrication_rate, average confidence.
+
+M. Deliverables the agent must provide at the end
+
+Short run report in plain English summarizing:
+
+Smoke test results (counts, errors)
+
+If smoke passed, progress of full run (or status if still running) and locations of outputs
+
+Key rotation status & any quota-related blocking occurrences (timestamps)
+
+Paths of key files:
+
+data/generation_stage_B/ar/judgmental_ar_final.jsonl
+
+data/generation_stage_B/en/judgmental_en_final.jsonl
+
+output/alpaca/…
+
+raw/ containing raw model responses
+
+logs/pipeline_run_<timestamp>.log
+
+A one-paragraph note about whether to proceed to Axolotl training now or do human review first (agent should recommend human review of 5% sample).
+
+Important safeguards
+
+Do not fabricate references. If model cannot produce a verifiable reference set "reference":"UNKNOWN" and "suspected_fabrication": true.
+
+Only accept reference if token overlap >= 0.75 vs chunk text.
+
+Temperature must be 0.0 for verification runs.
+
+The agent must report every 429 / quota event, and block the key accordingly.
+
+If any essential dependency missing (like google-genai library), install it using pip in the environment and log installations.
+
+Finally: Start by running the Arabic smoke test (20 examples) and return the smoke test result first. If the smoke test fails, do not start the full run; instead provide a clear debugging report and suggested fixes.
+
+End of prompt.
