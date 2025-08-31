@@ -1,12 +1,15 @@
 
 {
-  "keys": [
+  "API_KEYS": [
     "AIzaSyAspAo_UHjOCKxbmtaPCtldZ7g6XowHoV4",
     "AIzaSyCLfpievRZO_J_Ryme_1-1T4SjVBOPCfjI",
     "AIzaSyAIPk1An1O6sZiro64Q4R9PjVrqvPkSVvQ",
-    "AIzaSyBbidR_bEfiMrhOufE4PAHrYEBvuPuqakg"
+    "AIzaSyAIPk1An1O6sZiro64Q4R9PjVrqvPkSVvQ"
   ],
-  "models": ["models/gemini-2.5-pro", "models/gemini-2.5-flash", "models/gemini-2.5-flash-lite"],
-  "per_key_rate_limit_per_min": 12,
-  "concurrency_per_key": 2
+  "DEFAULT_MODELS": ["models/gemini-2.5-pro", "models/gemini-2.5-flash", "models/gemini-2.5-flash-lite"],
+  "SINGLE_MODEL_FALLBACK": null,
+  "MAX_FABRICATION_RATE": 0.10,
+  "BATCH_SIZE": 4,
+  "CONTEXT_MAX_CHARS": 2500,
+  "MAX_OUTPUT_TOKENS": 512
 }

@@ -1,3 +1,4 @@
+
 import json
 import uuid
 import time
@@ -9,8 +10,8 @@ from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 import logging
 
-from src.gemini_client import GeminiClient, batch_verify, robust_parse_json_array
-from src.gemini_config import BATCH_SIZE, CONTEXT_MAX_CHARS
+from src.gemini_client import GeminiClient, batch_verify, robust_parse_json_array, batch_verify_single
+from src.gemini_config import BATCH_SIZE, CONTEXT_MAX_CHARS, MAX_FABRICATION_RATE
 from src.parse_utils import parse_json_loose, compute_token_overlap, validate_example_schema, find_exact_substring
 from src.data_processor import DataProcessor
 
@@ -28,7 +29,7 @@ class DatasetGenerator:
 
         self.gemini_client = GeminiClient(config_path)
         self.processor = DataProcessor()
-        self.processor.load_data()
+        self._load_data_sources()
 
         self._load_seeds()
 
@@ -42,17 +43,53 @@ class DatasetGenerator:
         """Create necessary output directories"""
         directories = [
             "data/generation_stage_B/ar", "data/generation_stage_B/en",
-            "output/alpaca", "raw", "logs", "progress"
+            "output/alpaca", "raw", "logs", "progress", "manual_review"
         ]
         for directory in directories:
             Path(directory).mkdir(parents=True, exist_ok=True)
 
+    def _load_data_sources(self):
+        """Load data sources with priority: chunks.json > cleaned.txt"""
+        try:
+            # Try pre-chunked data first (preferred)
+            ar_chunks_file = Path("inputs/arabic_chunks.json")
+            en_chunks_file = Path("inputs/english_chunks.json")
+            
+            if ar_chunks_file.exists() and en_chunks_file.exists():
+                self.processor.load_data()
+                self.logger.info("Loaded pre-chunked data from chunks.json files")
+                return
+                
+            # Fallback to cleaned text files
+            ar_cleaned = Path("inputs/arabic_cleaned.txt")
+            en_cleaned = Path("inputs/english_cleaned.txt")
+            
+            if ar_cleaned.exists() and en_cleaned.exists():
+                self.logger.warning("Chunks files missing, falling back to cleaned text files")
+                self.processor.load_data()  # This will trigger auto-chunking
+                
+                # Save generated chunks for future use
+                derived_chunks_file = Path("inputs/derived_chunks_from_cleaned.json")
+                chunks_data = {
+                    "arabic_chunks": self.processor.arabic_chunks,
+                    "english_chunks": self.processor.english_chunks
+                }
+                with open(derived_chunks_file, 'w', encoding='utf-8') as f:
+                    json.dump(chunks_data, f, ensure_ascii=False, indent=2)
+                self.logger.info(f"Saved derived chunks to {derived_chunks_file}")
+            else:
+                raise FileNotFoundError("Neither chunks.json nor cleaned.txt files found")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to load data sources: {e}")
+            raise
+
     def _load_seeds(self):
-        """Load QA pairs as generation seeds"""
+        """Load QA pairs as generation seeds (secondary source for judgmental examples)"""
         try:
             # Try both possible filenames
-            ar_files = ["inputs/arabic_qa_pairs.json", "inputs/arabic_qa_pairs (2000).json"]
-            en_files = ["inputs/english_qa_pairs.json", "inputs/english_qa_pairs (2000).json"]
+            ar_files = ["inputs/arabic_qa_pairs (2000).json", "inputs/arabic_qa_pairs.json"]
+            en_files = ["inputs/english_qa_pairs (2000).json", "inputs/english_qa_pairs.json"]
 
             self.arabic_seeds = None
             for ar_file in ar_files:
@@ -92,7 +129,7 @@ class DatasetGenerator:
                 best_overlap = overlap
                 best_chunk_id = i
                 # Extract excerpt (first 512 chars or around the match)
-                best_excerpt = chunk_text[:512]
+                best_excerpt = chunk_text[:CONTEXT_MAX_CHARS]
 
         return best_chunk_id, best_excerpt
 
@@ -183,7 +220,7 @@ class DatasetGenerator:
             for variant in false_variants:
                 # Use a different chunk for context shift
                 wrong_chunk_id = (chunk_id + random.randint(5, 15)) % len(chunks)
-                wrong_excerpt = chunks[wrong_chunk_id].get("text", "")[:512]
+                wrong_excerpt = chunks[wrong_chunk_id].get("text", "")[:CONTEXT_MAX_CHARS]
 
                 false_candidate = {
                     "id": str(uuid.uuid4()),
@@ -329,49 +366,14 @@ class DatasetGenerator:
         
         return False, None
 
-    def _get_batch_verification_prompt(self, candidates: List[Dict], language: str) -> str:
-        """Create batch verification prompt for model"""
-        chunks = self.processor.arabic_chunks if language == "ar" else self.processor.english_chunks
-
-        items = []
-        for candidate in candidates:
-            chunk_id = candidate.get("context_chunk_id", 0)
-            chunk_text = chunks[chunk_id].get("text", "")[:4096]  # Limit chunk size
-
-            items.append({
-                "id": candidate["id"],
-                "claim": candidate["claim"],
-                "chunk_id": chunk_id,
-                "chunk_text": chunk_text
-            })
-
-        prompt = f"""You are an AAOIFI verifier. DO NOT INVENT REFERENCES and DO NOT use external knowledge beyond the provided chunk_text.
-
-Input JSON:
-{json.dumps({"items": items}, ensure_ascii=False)}
-
-Task: For each item return an object with fields:
-- id
-- verdict: "True" or "False"  
-- explanation: If True: a short verbatim quote (≤120 characters) from chunk_text that supports the claim. If False: a concise reason (≤120 chars).
-- reference: the exact substring from chunk_text that you quoted OR "UNKNOWN"
-- suspected_fabrication: boolean
-- confidence: number 0.0-1.0
-
-Rules:
-1. Use ONLY the provided chunk_text to verify.
-2. If chunk_text includes a verbatim supporting substring then verdict MUST be "True" and reference MUST equal that substring.
-3. Otherwise verdict MUST be "False", reference MUST be "UNKNOWN", and suspected_fabrication true.
-4. Always return EXACTLY one JSON ARRAY with verification objects in same order as input.
-
-Return: EXACTLY a JSON array. No additional text or markdown fences. Temperature=0.0."""
-
-        return prompt
-
-    def _batch_verify_with_model(self, candidates: List[Dict], language: str, batch_size: int = None) -> List[Dict]:
+    def _batch_verify_with_model(self, candidates: List[Dict], language: str, batch_size: int = None, single_verify: bool = False) -> List[Dict]:
         """Verify candidates using model in batches"""
         if batch_size is None:
             batch_size = BATCH_SIZE
+            
+        if single_verify:
+            self.logger.info("Using single verification mode")
+            return batch_verify_single(candidates)
             
         verified = []
         chunks = self.processor.arabic_chunks if language == "ar" else self.processor.english_chunks
@@ -394,7 +396,13 @@ Return: EXACTLY a JSON array. No additional text or markdown fences. Temperature
                 })
 
             # Call batch verification
-            verifications = batch_verify(items)
+            try:
+                verifications = batch_verify(items)
+            except Exception as e:
+                self.logger.error(f"Batch verification failed: {e}")
+                # Fallback to single verification
+                self.logger.info("Falling back to single verification")
+                verifications = batch_verify_single(items)
             
             # Apply verification results
             for j, verification in enumerate(verifications):
@@ -473,8 +481,28 @@ Return: EXACTLY a JSON array. No additional text or markdown fences. Temperature
             "fabrication_rate": fabrication_count / total if total > 0 else 0.0
         }
 
-    def run_smoke_test(self, language: str, target_count: int = 20) -> Dict:
-        """Run smoke test with specified number of examples"""
+    def _save_smoke_test_summary(self, language: str, stats: Dict, valid_examples: List[Dict], failed_raw_paths: List[str]):
+        """Save smoke test summary report"""
+        summary = {
+            "generated_count": stats["total"],
+            "verified_local": stats["true"],
+            "verified_model": stats["false"],
+            "fabrication_rate": stats["fabrication_rate"],
+            "failed_candidates": failed_raw_paths,
+            "timestamp": time.time(),
+            "language": language,
+            "max_fabrication_threshold": MAX_FABRICATION_RATE,
+            "success": stats["fabrication_rate"] <= MAX_FABRICATION_RATE
+        }
+        
+        summary_file = f"data/generation_stage_B/{language}/smoke_test_summary.json"
+        with open(summary_file, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+            
+        return summary_file
+
+    def run_smoke_test(self, language: str, target_count: int = 15) -> Dict:
+        """Run smoke test with enhanced validation and reporting"""
         self.logger.info(f"Starting smoke test for {language} with {target_count} examples")
 
         # Select seeds for smoke test
@@ -489,9 +517,15 @@ Return: EXACTLY a JSON array. No additional text or markdown fences. Temperature
         locally_verified, needs_model = self._local_pre_verification(candidates, language)
 
         # Model verification for remaining candidates
+        failed_raw_paths = []
         if needs_model:
             model_verified = self._batch_verify_with_model(needs_model, language, batch_size=4)
             all_examples = locally_verified + model_verified
+            
+            # Collect failed raw paths
+            for ex in model_verified:
+                if ex.get("suspected_fabrication") and ex.get("raw_response_path"):
+                    failed_raw_paths.append(ex["raw_response_path"])
         else:
             all_examples = locally_verified
 
@@ -511,17 +545,22 @@ Return: EXACTLY a JSON array. No additional text or markdown fences. Temperature
                 f.write(json.dumps(example, ensure_ascii=False) + "\n")
 
         stats = self._compute_stats(valid_examples)
+        
+        # Save summary report
+        summary_file = self._save_smoke_test_summary(language, stats, valid_examples, failed_raw_paths)
 
-        # Check fabrication rate - use 35% threshold for smoke test
-        if stats["fabrication_rate"] > 0.35:  # 35% threshold for smoke test
-            logging.warning(f"High fabrication rate detected: {stats['fabrication_rate']:.2%}")
+        # Check fabrication rate against threshold
+        if stats["fabrication_rate"] > MAX_FABRICATION_RATE:
+            self.logger.warning(f"High fabrication rate detected: {stats['fabrication_rate']:.2%} > {MAX_FABRICATION_RATE:.2%}")
             return {
                 "success": False,
                 "stats": stats,
                 "total_generated": len(valid_examples),
                 "output_file": output_file,
+                "summary_file": summary_file,
                 "samples": valid_examples[:3],
-                "error": f"Fabrication rate too high: {stats['fabrication_rate']:.2%}"
+                "failed_raw_paths": failed_raw_paths[:3],
+                "error": f"Fabrication rate too high: {stats['fabrication_rate']:.2%} > {MAX_FABRICATION_RATE:.2%}"
             }
 
         success = len(valid_examples) >= target_count * 0.8
@@ -530,7 +569,9 @@ Return: EXACTLY a JSON array. No additional text or markdown fences. Temperature
             "stats": stats,
             "total_generated": len(valid_examples),
             "output_file": output_file,
-            "samples": valid_examples[:3]
+            "summary_file": summary_file,
+            "samples": valid_examples[:3],
+            "failed_raw_paths": failed_raw_paths
         }
 
     def generate_full_dataset(self, language: str, target: int = 2000, progress_bar=None) -> Dict:
@@ -596,7 +637,8 @@ def main():
     parser.add_argument("--full", action="store_true", help="Run full generation")
     parser.add_argument("--lang", choices=["ar", "en"], required=True, help="Language")
     parser.add_argument("--target", type=int, default=2000, help="Target examples for full generation")
-    parser.add_argument("--smoke-count", type=int, default=20, help="Examples for smoke test")
+    parser.add_argument("--count", type=int, default=15, help="Examples for smoke test")
+    parser.add_argument("--single-verify", action="store_true", help="Use single verification mode")
 
     args = parser.parse_args()
 
@@ -604,7 +646,7 @@ def main():
         generator = DatasetGenerator()
 
         if args.smoke:
-            results = generator.run_smoke_test(args.lang, args.smoke_count)
+            results = generator.run_smoke_test(args.lang, args.count)
             print(json.dumps(results, indent=2, ensure_ascii=False))
         elif args.full:
             results = generator.generate_full_dataset(args.lang, args.target)

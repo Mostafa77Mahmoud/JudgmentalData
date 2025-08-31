@@ -1,24 +1,49 @@
 
-# src/gemini_config.py
-API_KEYS = [
-    "AIzaSyAspAo_UHjOCKxbmtaPCtldZ7g6XowHoV4",
-    "AIzaSyCLfpievRZO_J_Ryme_1-1T4SjVBOPCfjI",
-    "AIzaSyAIPk1An1O6sZiro64Q4R9PjVrqvPkSVvQ",
-    "AIzaSyBbidR_bEfiMrhOufE4PAHrYEBvuPuqakg"
-]
+import json
+import os
+from pathlib import Path
+from typing import List, Optional
 
-# Order models with verification model first
-MODELS = [
-    "models/gemini-2.5-pro",
-    "models/gemini-2.5-flash",
-    "models/gemini-2.5-flash-lite"
-]
+# Load configuration from config/keys.json
+config_file = Path("config/keys.json")
+if config_file.exists():
+    with open(config_file, 'r', encoding='utf-8') as f:
+        config = json.load(f)
+    
+    API_KEYS = config.get("API_KEYS", [])
+    MODELS = config.get("DEFAULT_MODELS", ["models/gemini-2.5-pro", "models/gemini-2.5-flash", "models/gemini-2.5-flash-lite"])
+    SINGLE_MODEL_FALLBACK = config.get("SINGLE_MODEL_FALLBACK")
+    MAX_FABRICATION_RATE = config.get("MAX_FABRICATION_RATE", 0.10)
+    BATCH_SIZE = config.get("BATCH_SIZE", 4)
+    CONTEXT_MAX_CHARS = config.get("CONTEXT_MAX_CHARS", 2500)
+    MAX_OUTPUT_TOKENS = config.get("MAX_OUTPUT_TOKENS", 512)
+else:
+    # Fallback to environment variables
+    API_KEYS = [
+        os.getenv("GEMINI_API_KEY"),
+        os.getenv("GEMINI_KEY_1"), 
+        os.getenv("GEMINI_KEY_2"),
+        os.getenv("GEMINI_KEY_3"),
+        os.getenv("GEMINI_KEY_4")
+    ]
+    API_KEYS = [key for key in API_KEYS if key]
+    MODELS = ["models/gemini-2.5-pro", "models/gemini-2.5-flash", "models/gemini-2.5-flash-lite"]
+    SINGLE_MODEL_FALLBACK = os.getenv("SINGLE_MODEL_FALLBACK")
+    MAX_FABRICATION_RATE = float(os.getenv("MAX_FABRICATION_RATE", "0.10"))
+    BATCH_SIZE = int(os.getenv("BATCH_SIZE", "4"))
+    CONTEXT_MAX_CHARS = int(os.getenv("CONTEXT_MAX_CHARS", "2500"))
+    MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "512"))
 
-# Tuning
-BATCH_SIZE = 6               # safe default (4-8 recommended)
+# Use single model fallback if specified
+if SINGLE_MODEL_FALLBACK:
+    MODELS = [SINGLE_MODEL_FALLBACK]
+
+# Verification settings
+VERIFIER_MODEL = MODELS[0]  # Use first model for verification
+VERIFIER_TEMPERATURE = 0.0
 MAX_RETRIES = 5
 INITIAL_BACKOFF = 1.0
-MAX_BACKOFF = 30.0
-CONTEXT_MAX_CHARS = 512
-VERIFIER_MODEL = "models/gemini-2.5-pro"
-VERIFIER_TEMPERATURE = 0.0
+MAX_BACKOFF = 16.0
+
+print(f"Loaded {len(API_KEYS)} unique API keys")
+print(f"Loaded {len(MODELS)} models from config: {MODELS}")
