@@ -41,24 +41,40 @@ def initialize_system():
             st.error(f"Missing required files: {missing_files}")
             return False
 
-        # Check for API keys
-        api_keys = [
-            os.getenv("GEMINI_API_KEY"),
-            os.getenv("GEMINI_KEY_1"),
-            os.getenv("GEMINI_KEY_2"), 
-            os.getenv("GEMINI_KEY_3"),
-            os.getenv("GEMINI_KEY_4")
-        ]
+        # Check for API keys from config/keys.json
+        keys_file = Path("config/keys.json")
+        api_keys = []
+        if keys_file.exists():
+            with open(keys_file, 'r', encoding='utf-8') as f:
+                keys_data = json.load(f)
+                # Assuming keys are stored in a list or dictionary, adapt as needed
+                if isinstance(keys_data, list):
+                    api_keys.extend(keys_data)
+                elif isinstance(keys_data, dict):
+                    api_keys.extend(keys_data.values())
+                else:
+                    st.warning("Unexpected format in keys.json. API keys might not be loaded correctly.")
+        
+        # Fallback to environment variables if config file is missing or empty
+        if not api_keys:
+            api_keys = [
+                os.getenv("GEMINI_API_KEY"),
+                os.getenv("GEMINI_KEY_1"),
+                os.getenv("GEMINI_KEY_2"), 
+                os.getenv("GEMINI_KEY_3"),
+                os.getenv("GEMINI_KEY_4")
+            ]
 
         valid_keys = [key for key in api_keys if key]
         if not valid_keys:
-            st.error("No valid Gemini API keys found. Please set GEMINI_API_KEY or GEMINI_KEY_1-4 environment variables.")
+            st.error("No valid Gemini API keys found. Please set GEMINI_API_KEY or GEMINI_KEY_1-4 environment variables, or provide keys in config/keys.json.")
             return False
 
         # Initialize components
         st.session_state.processor = DataProcessor()
         st.session_state.knowledge_base = AAOIFIKnowledgeBase()
-        st.session_state.generator = DatasetGenerator("config/keys.json")
+        # Pass the list of valid API keys to DatasetGenerator
+        st.session_state.generator = DatasetGenerator(valid_keys)
 
         # Load data
         st.session_state.processor.load_data()
@@ -66,6 +82,12 @@ def initialize_system():
 
         return True
 
+    except FileNotFoundError:
+        st.error("Configuration file 'config/keys.json' not found. Please ensure it exists or set environment variables.")
+        return False
+    except json.JSONDecodeError:
+        st.error("Error decoding 'config/keys.json'. Please ensure it's valid JSON.")
+        return False
     except Exception as e:
         st.error(f"Failed to initialize system: {str(e)}")
         return False
@@ -259,7 +281,21 @@ def system_status_page():
 
     # API Keys status
     st.subheader("API Keys Status")
-    api_keys = [
+    # Check keys from config file first, then environment variables
+    keys_from_config = []
+    keys_file = Path("config/keys.json")
+    if keys_file.exists():
+        try:
+            with open(keys_file, 'r', encoding='utf-8') as f:
+                keys_data = json.load(f)
+                if isinstance(keys_data, list):
+                    keys_from_config.extend(keys_data)
+                elif isinstance(keys_data, dict):
+                    keys_from_config.extend(keys_data.values())
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass # Ignore errors here, will be reported by env vars
+
+    env_keys = [
         ("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY")),
         ("GEMINI_KEY_1", os.getenv("GEMINI_KEY_1")),
         ("GEMINI_KEY_2", os.getenv("GEMINI_KEY_2")),
@@ -267,17 +303,43 @@ def system_status_page():
         ("GEMINI_KEY_4", os.getenv("GEMINI_KEY_4"))
     ]
 
+    all_keys_info = {}
+    for key_name, key_value in env_keys:
+        all_keys_info[key_name] = key_value
+
+    for key in keys_from_config:
+        # Add keys from config if they are not already present from env vars,
+        # or update if env var is missing but config has it.
+        # This logic might need refinement based on how you want to prioritize.
+        # For now, we'll just list all found keys.
+        # A simple approach is to just check if any key exists.
+        pass # Keys are already captured in all_keys_info if they were env vars
+
     key_status = []
-    for key_name, key_value in api_keys:
+    # Display keys found in config file
+    for i, key in enumerate(keys_from_config):
+        key_status.append({
+            "Key Source": "config/keys.json",
+            "Key Name": f"Key {i+1}",
+            "Status": "✅ Set",
+            "Value": f"{key[:10]}..." if key else "Not set"
+        })
+    
+    # Display environment variables
+    for key_name, key_value in env_keys:
         status = "✅ Set" if key_value else "❌ Missing"
         masked_key = f"{key_value[:10]}..." if key_value else "Not set"
-        key_status.append({
-            "Key": key_name,
-            "Status": status,
-            "Value": masked_key
-        })
+        # Avoid duplicating if key from config is the same as env var
+        if key_name not in all_keys_info or all_keys_info[key_name] != key_value:
+             key_status.append({
+                "Key Source": "Environment Variable",
+                "Key Name": key_name,
+                "Status": status,
+                "Value": masked_key
+            })
 
     st.dataframe(pd.DataFrame(key_status))
+
 
     # Progress status
     st.subheader("Generation Progress")
