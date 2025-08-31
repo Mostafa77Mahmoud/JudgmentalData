@@ -3,7 +3,7 @@
   "DEFAULT_MODELS": ["models/gemini-2.5-flash-lite"],
   "SINGLE_MODEL_FALLBACK": "models/gemini-2.5-flash-lite",
   "BATCH_VERIFY_SIZE": 1,
-  "MAX_EXCERPT_CHARS": 512,
+  "MAX_EXCERPT_CHARS": 5012,
   "MAX_SMOKE_EXAMPLES": 20,
   "MAX_API_ATTEMPTS": 5,
   "BACKOFF_SCHEDULE": [1,2,4,8,16]
