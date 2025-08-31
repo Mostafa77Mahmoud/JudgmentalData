@@ -1,0 +1,70 @@
+# imports (أضفها أعلى الملف)
+import os, time, json, logging
+from google.protobuf.json_format import MessageToDict
+
+logger = logging.getLogger(__name__)
+MAX_API_ATTEMPTS = 5
+
+# دالة لحفظ الاستجابة الخام — attempt اختياري الآن
+def save_raw_response(resp_obj, model_name="unknown_model", attempt: int = 0):
+    """Save raw API response (best-effort). Returns saved path."""
+    os.makedirs("raw", exist_ok=True)
+    ts = int(time.time() * 1000)
+    safe_name = model_name.replace("/", "_")
+    path = f"raw/{ts}_{safe_name}_att{attempt}.resp.json"
+    try:
+        # إذا كانت استجابة قابلة للتحويل لـ dict/proto
+        try:
+            # MessageToDict للتعامل مع protobuf repeated fields
+            body = MessageToDict(resp_obj) if hasattr(resp_obj, "__class__") and "Message" in resp_obj.__class__.__name__ else None
+        except Exception:
+            body = None
+
+        if body is None:
+            # حاول استدعاء json() أو text ، وإلا fallback إلى repr
+            if hasattr(resp_obj, "json"):
+                try:
+                    body = resp_obj.json()
+                except Exception:
+                    body = None
+            if body is None and hasattr(resp_obj, "text"):
+                body = {"text": getattr(resp_obj, "text")}
+        # آخر ملاذ: اكتب تمثيل الـ obj
+        if body is None:
+            body = {"repr": repr(resp_obj)}
+
+        with open(path, "w", encoding="utf8") as f:
+            json.dump(body, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        # إن فشل كل شيء — اكتب repr
+        with open(path, "w", encoding="utf8") as f:
+            f.write(repr(resp_obj))
+        logger.exception("Failed to json-dump response while saving raw, wrote repr instead.")
+    logger.info("Saved raw response to %s", path)
+    return path
+
+# robust serialization helper (يسمّيها safe_serialize_response)
+def safe_serialize_response(resp):
+    """Return a JSON-serializable dict/list for resp, or raise descriptive error."""
+    # 1) protobuf -> dict
+    try:
+        return MessageToDict(resp)
+    except Exception:
+        pass
+    # 2) try resp.json()
+    try:
+        if hasattr(resp, "json"):
+            try:
+                return resp.json()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # 3) try resp.text
+    try:
+        if hasattr(resp, "text"):
+            return {"text": resp.text}
+    except Exception:
+        pass
+    # 4) fallback: repr
+    return {"repr": repr(resp)}

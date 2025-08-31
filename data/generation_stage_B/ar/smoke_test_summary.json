@@ -1,10 +1,10 @@
 {
-  "generated_count": 19,
+  "generated_count": 14,
   "verified_local": 0,
-  "verified_model": 19,
+  "verified_model": 14,
   "fabrication_rate": 1.0,
   "failed_candidates": [],
-  "timestamp": 1756640994.916622,
+  "timestamp": 1756641305.6305788,
   "language": "ar",
   "max_fabrication_threshold": 0.1,
   "success": false
