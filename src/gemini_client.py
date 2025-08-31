@@ -28,12 +28,15 @@ class GeminiClient:
         # Create raw responses directory
         Path("raw").mkdir(exist_ok=True)
         
-        # Model priority order
-        self.models = [
-            "models/gemini-2.0-flash-exp",
-            "models/gemini-1.5-flash",
-            "models/gemini-1.5-pro"
-        ]
+        # Load models from config or use defaults
+        self.models = self._load_models_from_config(config_path)
+        if not self.models:
+            # Default to 2.5 models if no config
+            self.models = [
+                "models/gemini-2.5-pro",
+                "models/gemini-2.5-flash", 
+                "models/gemini-2.5-flash-lite"
+            ]
         
     def _load_api_keys(self, config_path: Optional[str]) -> List[str]:
         """Load API keys from environment variables or config file"""
@@ -69,6 +72,25 @@ class GeminiClient:
                 
         self.logger.info(f"Loaded {len(unique_keys)} unique API keys")
         return unique_keys
+
+    def _load_models_from_config(self, config_path: Optional[str]) -> List[str]:
+        """Load model list from config file"""
+        if not config_path or not Path(config_path).exists():
+            return []
+            
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config_data = json.load(f)
+                
+            models = config_data.get("models", [])
+            if models:
+                self.logger.info(f"Loaded {len(models)} models from config: {models}")
+                return models
+                
+        except Exception as e:
+            self.logger.warning(f"Failed to load models from config: {e}")
+            
+        return []
         
     def _get_next_available_key(self) -> Tuple[Optional[str], int]:
         """Get next available API key, rotating if current is blocked"""

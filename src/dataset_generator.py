@@ -326,9 +326,9 @@ Return: EXACTLY a JSON array. No additional text or markdown fences. Temperature
             batch = candidates[i:i + batch_size]
             prompt = self._get_batch_verification_prompt(batch, language)
 
-            # Use Gemini Pro for verification
+            # Use Gemini 2.5 Pro for verification
             result = self.gemini_client.call_model(
-                "models/gemini-2.0-flash-exp",
+                "models/gemini-2.5-pro",
                 prompt,
                 max_tokens=4096,
                 temperature=0.0
