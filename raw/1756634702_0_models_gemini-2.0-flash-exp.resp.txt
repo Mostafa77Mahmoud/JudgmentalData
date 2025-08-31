@@ -1,0 +1,31 @@
+TIMESTAMP: 1756634702
+MODEL: models/gemini-2.0-flash-exp
+KEY_INDEX: 0
+PROMPT:
+You are an AAOIFI verifier. DO NOT INVENT REFERENCES and DO NOT use external knowledge beyond the provided chunk_text.
+
+Input JSON:
+{"items": [{"id": "9a347102-770b-44d0-bd5e-0f300e7d6f8a", "claim": "Partnership of Ownership is established either by events beyond the partners' control, such as inheritance rights in a deceased person's estate, or by the partners' own volition, for instance, when multiple parties jointly acquire shares in a specific asset.", "chunk_id": 62, "chunk_text": "The basis for the permissibility of unilateral termination of participation in this kind of partnership by any of the partners is that, in principle, unilateral termination of participation is allowed provided such action inflicts no damage to any of the partners as per the saying of the Prophet (peace be upon him): “No harm to be inflicted and no reciprocal harm. ”(31)\n\nSee: International Islamic Fiqh Academy Resolution No. 63 (1/7).\n\nSee: Abdul-Aziz Al-Khayyat, “Al-Sharikat” [2: 235].\n\nThe Hadith has been related by Ibn Majah in his “Sunan” [2: 784].\n\nDiminishing Partnership\n\n■ The basis for saying that all the general rules for partnerships, especially the rules for ’Inan partnership, are applicable to diminishing partnerships is to safeguard this new form of partnership from becoming a mere interest-based financing transaction in which a client undertakes to pay another party for his finance in addition to a share in the partnership income.\n\n■ The basis for the impermissibility of one partner being responsible for the expenses of insurance or maintenance is that this condition is in conflict with the nature of the partnership contract. (32)\n\nSee: Fatwa No. (219) of the Fatwas of Kuwait Finance House.\n\nAppendix (C) Definitions\n\nContract Partnership (Sharikat al-’Aqd)\n\nContract partnership is an agreement between two or more parties to combine their assets or to merge their services or obligations and liabilities with the aim of making profit.\n\nPartnership of Ownership (Sharikat al-Milk)\n\nPartnership of ownership (Sharikat al-Milk) is the combination of the assets of two or more persons in a manner that creates a state of sharing the realised profit or income or benefiting from an increase in the value of the partnership assets. This combination of assets for making profit necessitates bearing losses, if any. The ownership partnership is created by events beyond the partners’ control such as the inheritance rights of heirs in the legacy of a deceased person. This partnership is also created by the wish of the partners such as when two or more parties acquire common shares in a particular asset.\n\nMufawadah Partnership\n\nMufawadah partnership is any partnership in which the parties are equal in all respects, such as funds contributed by them, their right to act and their liability, from the commencement of the partnership to the date of its termination.\n\nSharecropping Partnership (Muzara’ah)\n\nSharecropping is partnership in crops in which one party presents land to another for cultivation and maintenance in consideration for a common defined share in the crop.\n\nIrrigating Partnership (Musaqat)\n\nIrrigating partnership is a partnership that depends on one party presenting designated plants/trees that produce edible fruits to another in order to work on their irrigation in consideration for a common defined share in the fruits.\n\nAgricultural Partnership (Mugharasah)\n\nAgricultural partnership is a partnership in which one party presents a treeless piece of land to another to plant trees on it on the condition that they share the trees and fruits in accordance with a defined percentage.\n\nDistribution of Proceeds and Profits\n\nDistribution of proceeds and profits is a process of termination an undivided ownership in the company by the final distribution of the assets whereby rights of each partner are defined and common shares are partitioned into identified sets for each partner. This is why distribution is defined as identification of undefined shares or proceeds of a particular person.\n\nSubject\tPage\n\nPreface. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .\t369\n\nStatement of the Standard. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .\t370\n\nScope of the Standard. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . "}]}
+
+Task: For each item return an object with fields:
+- id
+- verdict: "True" or "False"  
+- explanation: If True: a short verbatim quote (≤120 characters) from chunk_text that supports the claim. If False: a concise reason (≤120 chars).
+- reference: the exact substring from chunk_text that you quoted OR "UNKNOWN"
+- suspected_fabrication: boolean
+- confidence: number 0.0-1.0
+
+Rules:
+1. Use ONLY the provided chunk_text to verify.
+2. If chunk_text includes a verbatim supporting substring then verdict MUST be "True" and reference MUST equal that substring.
+3. Otherwise verdict MUST be "False", reference MUST be "UNKNOWN", and suspected_fabrication true.
+4. Always return EXACTLY one JSON ARRAY with verification objects in same order as input.
+
+Return: EXACTLY a JSON array. No additional text or markdown fences. Temperature=0.0.
+
+RESPONSE:
+```json
+[
+  {"id": "9a347102-770b-44d0-bd5e-0f300e7d6f8a", "verdict": "True", "explanation": "The ownership partnership is created by events beyond the partners’ control such as the inheritance rights of heirs in the legacy", "reference": "The ownership partnership is created by events beyond the partners’ control such as the inheritance rights of heirs in the legacy", "suspected_fabrication": false, "confidence": 1.0}
+]
+```
