@@ -19,7 +19,7 @@ ARABIC_VERIFIER_PROMPT = '''
     "context_chunk_id": انسخ_الرقم_من_المدخل,
     "context_excerpt": "انسخ_من_المدخل",
     "verdict": "True|False|Unknown",
-    "explanation": "تبرير_مختصر_أو_فارغ_إذا_مجهول",
+    "explanation": "تبرير_مختصر_حد_أقصى_100_كلمة",
     "reference": "نص_دقيق_من_السياق_أو_UNKNOWN",
     "suspected_fabrication": true_إذا_false_أو_unknown,
     "generator_model": "local",
@@ -27,6 +27,8 @@ ARABIC_VERIFIER_PROMPT = '''
     "meta": {"confidence": 0.1_إلى_1.0}
   }
 ]
+
+تذكر: explanation يجب أن يكون مختصر جداً (حد أقصى 100 كلمة). لا تكتب مقالات طويلة.
 '''
 
 ENGLISH_VERIFIER_PROMPT = '''
@@ -48,7 +50,7 @@ Output format - ONLY JSON array, no markdown blocks:
     "context_chunk_id": copy_number_from_input,
     "context_excerpt": "copy_from_input",
     "verdict": "True|False|Unknown",
-    "explanation": "brief_reasoning_or_empty_if_unknown",
+    "explanation": "brief_reasoning_max_100_words",
     "reference": "exact_text_from_context_or_UNKNOWN",
     "suspected_fabrication": true_if_false_or_unknown,
     "generator_model": "local",
@@ -56,4 +58,6 @@ Output format - ONLY JSON array, no markdown blocks:
     "meta": {"confidence": 0.1_to_1.0}
   }
 ]
+
+Remember: explanation must be very brief (maximum 100 words). Do not write long essays.
 '''

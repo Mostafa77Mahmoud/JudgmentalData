@@ -160,9 +160,10 @@ def send_verify_request(model_name: str, api_key: str, prompt_text: str,
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name)
 
+        # Strict config for verification - JSON responses should be small
         generation_config = genai.GenerationConfig(
-            temperature=VERIFIER_TEMPERATURE,
-            max_output_tokens=min(max_tokens, MAX_OUTPUT_TOKENS),
+            temperature=0.0,
+            max_output_tokens=2000,  # Verification needs small JSON, not 40k
             response_mime_type="application/json")
 
         response = model.generate_content(prompt_text,
@@ -397,10 +398,8 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
     language = items[0].get("language", "en") if items else "en"
     est_tokens_per_item = 800 if language == "ar" else 400  # Arabic needs more tokens
 
-    # Use smaller max tokens to avoid truncation - cap at reasonable limit for verification
-    max_tokens = min(MAX_OUTPUT_TOKENS, 
-                     est_tokens_per_item * max(1, len(items)),
-                     10000)  # Cap at 10k for verification responses
+    # Use small max tokens for verification - JSON responses should be concise
+    max_tokens = 2000  # Fixed limit for verification responses
     
     # Ensure we don't exceed input token limits
     estimated_input_tokens = len(json.dumps(items, ensure_ascii=False)) // 3  # Rough estimate
@@ -577,7 +576,7 @@ class GeminiClient:
 
                 generation_config = genai.GenerationConfig(
                     temperature=temperature,
-                    max_output_tokens=max_tokens,
+                    max_output_tokens=min(max_tokens, 2000),  # Cap at 2000 for verification
                     response_mime_type="application/json"
                 )
 
