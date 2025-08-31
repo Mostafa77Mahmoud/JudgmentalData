@@ -48,14 +48,32 @@ def save_raw_body(body: Dict, filename_prefix: str) -> str:
         f.write(json.dumps(body, ensure_ascii=False) + "\n")
     return filepath
 
-def save_raw_response(response_text: str, model: str, attempt: int = 0) -> str:
-    """Save raw response for debugging"""
+def save_raw_response(resp_obj, model_name="unknown_model", attempt: int = 0) -> str:
+    """Save raw API response (best-effort). Returns saved path."""
     os.makedirs("raw", exist_ok=True)
-    timestamp = int(time.time())
-    filename = f"raw/{timestamp}_{attempt}_{model.replace('/', '_')}.resp.txt"
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(response_text)
-    return filename
+    ts = int(time.time() * 1000)
+    safe_name = model_name.replace("/", "_")
+    path = f"raw/{ts}_{safe_name}_att{attempt}.resp.json"
+    try:
+        with open(path, "w", encoding="utf8") as f:
+            # Handle protobuf responses safely
+            if hasattr(resp_obj, "_pb"):
+                safe_response = MessageToDict(resp_obj._pb)
+            elif hasattr(resp_obj, "_raw_response"):
+                safe_response = MessageToDict(resp_obj._raw_response)
+            else:
+                safe_response = str(resp_obj)
+            
+            json.dump(safe_response, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        # Fallback to plain text if JSON fails
+        try:
+            with open(path.replace(".json", ".txt"), "w", encoding="utf8") as f:
+                f.write(str(resp_obj))
+            path = path.replace(".json", ".txt")
+        except Exception:
+            pass
+    return path
 
 
 def extract_text_from_parsed(body_dict: Dict) -> Optional[str]:
@@ -206,7 +224,7 @@ def send_verify_request(model_name: str, api_key: str, prompt_text: str, max_tok
             "attempt": attempt,
             "timestamp": time.time()
         }
-        error_path = save_raw_response(json.dumps(error_data, ensure_ascii=False), f"error_{attempt}")
+        error_path = save_raw_response(error_data, f"error_{attempt}", attempt)
         logger.error(f"API call failed, error saved to {error_path}")
         raise
 
@@ -365,10 +383,8 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
         try:
             prompt_text = prepare_verifier_request(items, max_tokens)
             resp_text = send_verify_request(VERIFIER_MODEL, api_key, prompt_text, max_tokens, attempt)
-            ts = int(time.time())
-            raw_path = f"raw/{ts}_verify_{attempt}_{VERIFIER_MODEL.replace('/','_')}.resp.txt"
-            with open(raw_path, "w", encoding="utf8") as f:
-                f.write(resp_text)
+            # Save the raw response using the updated function
+            raw_path = save_raw_response(resp_text, f"verify_{VERIFIER_MODEL}", attempt)
 
             parsed = robust_parse_json_array(resp_text)
             if parsed is None:
@@ -617,15 +633,26 @@ class GeminiClient:
 def safe_serialize_response(response):
     """ Safely serializes the response object, returning a dictionary. """
     try:
-        # Use MessageToDict for proper protobuf serialization if available
-        return MessageToDict(response._raw_response)
-    except AttributeError:
-        # Fallback if _raw_response is not available or not a protobuf message
-        logger.warning("Could not access _raw_response for MessageToDict, using response.text")
+        # Try different protobuf attributes
+        if hasattr(response, "_pb"):
+            return MessageToDict(response._pb)
+        elif hasattr(response, "_raw_response"):
+            return MessageToDict(response._raw_response)
+        elif hasattr(response, "candidates"):
+            # Handle Gemini response structure directly
+            return {
+                "candidates": [MessageToDict(c._pb) if hasattr(c, "_pb") else str(c) for c in response.candidates],
+                "prompt_feedback": str(getattr(response, "prompt_feedback", "")),
+                "usage_metadata": str(getattr(response, "usage_metadata", ""))
+            }
+        else:
+            return {"text": str(response)}
+    except Exception as e:
+        logger.warning(f"Could not serialize response with MessageToDict: {e}")
         try:
-            return response.json()
+            return {"text": getattr(response, "text", str(response))}
         except Exception:
-            return {"text": response.text} # Return text if json parsing fails
+            return {"error": f"Serialization failed: {str(e)}", "raw": str(response)}
 
 
 def extract_text_from_parsed(body_dict: Dict) -> Optional[str]:
