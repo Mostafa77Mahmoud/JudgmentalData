@@ -1,0 +1,177 @@
+لملخص: ليه بتحصل FinishReason.MAX_TOKENS رغم إنك عامل حدود كبيرة؟
+
+الأسباب الشائعة اللي اللوجات بتشير لها:
+
+الـ max_output_tokens مش بيتبعت فعلاً للـ API أو بيُرسَل باسم/بنية غير متطابقة مع اللي مكتبة google_genai بتتوقعها → النموذج يرجع لحد افتراضي صغير ويتقطع.
+
+أو الـ prompt بيطلب إخراج كبير جداً فتطلب من الموديل مقدار أكبر من اللي انت فعلاً مرسِل، فيطلع MAX_TOKENS لأنه وصل للحد اللي تم تمريره أو لحد داخلي.
+
+أو الموديل نفسه ممكن يكون مقيَّد (safety / policy / blocked content) فيقبل يقطع الرد — لكن غالباً اللوج هنا واضح: تم الوصول للحد.
+
+بالنسبة لإدارة المفاتيح: لوجاتك تظهر نفس الـ key index (key 0) في محاولات متعددة → معنها إن rotation مش شغّال أو الـ key manager مش مستخدم صحيح عند كل طلب.
+
+خطة إصلاح عملية (تُطبق فورًا)
+1) تأكيد إرسال max_output_tokens في كل استدعاء
+
+تأكد إن جسم الطلب المحترَف يضم الحقل الصحيح. في معظم الـ clients/bindings الحديثة اسم الحقل max_output_tokens. في src/gemini_client.py غيّر دالة النداء للـ API لتبدو كده (مقتطف عملي — عدّله ليتماشى مع واجهتك):
+
+# مثال مبسّط لاستدعاء httpx مباشرة (شغال في أي repo)
+import httpx, json, time, logging
+from src.api_key_manager import api_key_manager  # class instance
+
+logger = logging.getLogger(__name__)
+
+def call_gemini_http(prompt, model="gemini-2.5-flash", max_output_tokens=60000, temperature=0.0, **kwargs):
+    key = api_key_manager.get_key()
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+    payload = {
+      "prompt": {
+        "text": prompt
+      },
+      "max_output_tokens": max_output_tokens,
+      "temperature": temperature,
+      # أضف أي حقول أخرى مطلوبة من الAPI لديك
+    }
+
+    headers = {
+      "Authorization": f"Bearer {key}",
+      "Content-Type": "application/json; charset=utf-8"
+    }
+
+    r = httpx.post(url, headers=headers, json=payload, timeout=120)
+    # سجل الـ request/response الكاملين عند الـ debug
+    raw_path = f"raw/{int(time.time()*1000)}_resp.txt"
+    with open(raw_path, "wb") as f:
+        f.write(r.content)
+    if r.status_code != 200:
+        api_key_manager.report_failure(key, r.text)
+        raise RuntimeError(f"Status {r.status_code}: {r.text}")
+    api_key_manager.report_success(key)
+    return r.json()
+
+
+فعل: افتح الـ raw response اللي بتسجّله (raw/...resp.txt) وتأكد جسم الـ request في اللوج (httpx logs). لو مفيش max_output_tokens — يبقى لازم تعدّل wrapper أو استخدام client API الصحيح.
+
+2) (فوري) Retry ذكي عند FinishReason.MAX_TOKENS — حاول تلقائياً بزيادة أو تجزئة
+
+لو النموذج اتقطع تقدر تجرّب:
+
+أولاً: لو max_output_tokens اللي أرسلته أقل من 60k — زودها تدريجياً (مثلاً ×2) حتى الحد المسموح (60k).
+
+ثانياً: لو ما زال يتقطع، قسّم الطلب: بدلاً تطلب 100 سيناريو في مرة واحدة، اطلب 5 سيناريوهات في كل request واجمع النتايج.
+
+مقتطف retry + split:
+
+def generate_with_retries(prompt, model, initial_max=2000, max_allowed=60000, attempts=4):
+    max_tok = initial_max
+    for att in range(attempts):
+        resp = call_gemini_http(prompt, model=model, max_output_tokens=max_tok)
+        # افحص finish_reason داخل resp
+        finish = resp.get("finish_reason") or resp.get("candidates", [{}])[0].get("finish_reason")
+        text = extract_text_from_response(resp)
+        if finish and "MAX_TOKENS" in finish.upper():
+            # لو لسه أقل من الحد المسموح زود وعاود
+            if max_tok < max_allowed:
+                max_tok = min(max_allowed, max_tok * 2)
+                logger.info("Truncated — increasing max_output_tokens -> %s", max_tok)
+                continue
+            else:
+                # إذا وصلنا للحد، فاجزأ المهمة وارجع فشل للحالة اللي تطلب تقسيم خارجي
+                raise RuntimeError("Truncated even at max_allowed. Split request.")
+        return text
+    raise RuntimeError("Retries exhausted")
+
+3) احرص على استخراج النص من البنية الصحيحة (parts / candidates)
+
+الـ client بيرد أحياناً في response.candidates أو response.output أو response.parts. دايماً اعمل function موحدة:
+
+def extract_text_from_response(resp):
+    # تفقد الحقول الممكنة
+    if "candidates" in resp:
+        texts = [c.get("content", {}).get("text", "") for c in resp["candidates"]]
+        return "".join(texts)
+    if "output" in resp:
+        # بعض واجهات ترجع output -> parts
+        out = resp["output"]
+        if isinstance(out, list):
+            return "".join([p.get("text","") for p in out])
+        elif isinstance(out, dict) and "text" in out:
+            return out["text"]
+    # fallback to raw string
+    return str(resp)
+
+4) خفّض الــ output المطلوب داخل البرومبت: أطلب JSON صغير ومنظم
+
+بدلاً تطلب “اعطني 50 سيناريو كامل” اطلب كل استدعاء يرجع JSON بقالب واقعي وصغير. مثال برومبت عربي موجز:
+
+انت مقيّم دقيق. اعطِني **3 أمثلة** فقط لكل مدخل: كل مثال حقلاته:
+{
+  "id": "<uuid>",
+  "claim": "<جملة قصيرة>",
+  "label": "True|False|Unknown",
+  "evidence": [{"chunk_id": <int>, "start": <int>, "end": <int>, "excerpt": "<≤750 chars>"}],
+  "explanation": "<≤60 words>",
+  "confidence": 0.0-1.0
+}
+أعِد الناتج **JSON array only** فقط — بدون كلام خارجي أو شروحات.
+
+
+هذي الخطوة تقلل احتمالات توليد رد عملاق أو حشو كلامي.
+
+5) إدارة مفاتيح الـ API: تأكد rotation فعّال
+
+المشكلة إنه في لوجاتك نفس الـ key index ظاهر. استعمال الـ APIKeyManager لازم يكون قبل كل طلب:
+
+كل طلب استدعي key = api_key_manager.get_key() ثم استعمل الـ key في header أو في client config.
+
+لو تستخدم google_genai lib التي تهيّئ client مرة واحدة، بدّل إنشاء client per-request أو استعمل HTTP مباشرة مع header Authorization لكل طلب. مثال بالأعلى يبيّن ذلك.
+
+6) رصد وتحليل تلقائي للـ raw responses
+
+اكتب سكربت سريع يقرأ raw/*.resp.txt ويطبع:
+
+هل فيه نص فعلي؟
+
+finish_reason؟
+
+هل في JSON جزئي؟
+
+مثال:
+
+import glob, json
+for p in glob.glob("raw/*resp.txt"):
+    with open(p,'rb') as f:
+        b = f.read()
+    s = b.decode('utf-8', errors='replace')
+    print("=== file", p)
+    print(s[:2000])
+    # حاول parse json
+    try:
+        j = json.loads(s)
+        print("has json keys:", list(j.keys())[:10])
+    except:
+        print("not strict json")
+
+
+افتح أول ملفين اللي انت حفظتهم (raw/175665...) وشوف الـ payload والـ response الفعلي — ده هيكشف إذا max_output_tokens اتبعَت ولا لا.
+
+خطوات تنفيذ سريعة (أيّ واحدة تعملها الآن وتُبلّغني النتيجة)
+
+عدّل call_gemini_http كما في المثال لـ يضم header Authorization من APIKeyManager.get_key() وحقن max_output_tokens.
+
+شغّل smoke test واحفظ raw response. لو ما زال MAX_TOKENS — شغّل generate_with_retries ببدء initial_max=2000 وزيادة تدريجية حتى max_allowed=60000. راقب أي ملف raw جديد.
+
+لو ترجع مقطوعة حتى بعد 60k → ابدأ تقسيم المهمة (N أمثلة لكل طلب) وادمج النتائج لاحقًا.
+
+راجع الـ raw response الأول وابعتلي أول 500-2000 حرف منه (أو اسم الملف) لو حابب أفسّرلك المحتوى عشان أقول السبب الدقيق (هل فيه جزئية policy block؟).
+
+خاتمة سريعة — توصيات نهائية
+
+اضبط max_output_tokens في كل request وصِف prompt ليُطلِق JSON صغير.
+
+نفّذ key rotation per-request (لا تعتمد client مُهيَّأ بمفتاح واحد فقط).
+
+استعمل retry ذكي يزوّد max_output_tokens تدريجياً ثم يقسم المهمة إن فشل.
+
+راجع ملفات raw/*.resp.txt لتعرف إن كان ال SDK بتاعك بيحوّل الاسماء أو بيحذف الحقل.
