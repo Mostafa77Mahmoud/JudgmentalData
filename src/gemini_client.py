@@ -8,7 +8,7 @@ import threading
 import re
 from typing import List, Dict, Optional, Tuple, Any, Union
 from pathlib import Path
-from google import genai
+import google.generativeai as genai
 from google.genai import types
 from src.gemini_config import API_KEYS, MODELS, BATCH_SIZE, MAX_RETRIES, CONTEXT_MAX_CHARS, VERIFIER_MODEL, VERIFIER_TEMPERATURE, MAX_OUTPUT_TOKENS
 
@@ -92,20 +92,19 @@ def backoff_with_jitter(attempt: int) -> float:
     return max(0.1, base + jitter)
 
 def send_verify_request(model_name: str, api_key: str, prompt_text: str, max_tokens: int, attempt: int) -> str:
-    """Send verification request using new Google GenAI SDK"""
+    """Send verification request using Google Generative AI SDK"""
     try:
-        client = genai.Client(api_key=api_key)
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
         
-        config = types.GenerateContentConfig(
+        generation_config = genai.types.GenerationConfig(
             temperature=VERIFIER_TEMPERATURE,
             max_output_tokens=max_tokens,
-            response_mime_type="application/json"
         )
 
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt_text,
-            config=config
+        response = model.generate_content(
+            prompt_text,
+            generation_config=generation_config
         )
 
         # Save raw response for debugging
@@ -364,24 +363,22 @@ class GeminiClient:
     def _block_key(self, key_index: int, duration: int = 300):
         """Block a key for specified duration"""
         with self.lock:
-            self.key_states[key_index]["blocked_until"] = float(time.time() + duration)
+            self.key_states[key_index]["blocked_until"] = int(time.time() + duration)
             self.logger.warning(f"Blocked key {key_index} for {duration}s")
 
-    def call_model(self, prompt: str, model: str = "models/gemini-2.0-flash", max_tokens: int = 8192,
+    def call_model(self, prompt: str, model: str = "gemini-1.5-flash", max_tokens: int = 8192,
                    temperature: float = 0.0, max_attempts: int = 3) -> Dict:
-        """Call Gemini model using new SDK with multiple model support"""
+        """Call Gemini model using Google Generative AI SDK"""
         
-        # Validate model name - update supported models based on documentation
+        # Use available models
         supported_models = [
-            "models/gemini-2.0-flash", 
-            "models/gemini-2.0-pro", 
-            "models/gemini-2.5-flash-lite",
-            "models/gemini-2.5-flash",
-            "models/gemini-2.5-pro"
+            "gemini-1.5-flash", 
+            "gemini-1.5-pro", 
+            "gemini-pro"
         ]
         if model not in supported_models:
-            self.logger.warning(f"Model {model} not in supported list, using gemini-2.0-flash")
-            model = "models/gemini-2.0-flash"
+            self.logger.warning(f"Model {model} not in supported list, using gemini-1.5-flash")
+            model = "gemini-1.5-flash"
         
         for attempt in range(max_attempts):
             key, key_index = self._get_next_available_key()
@@ -390,18 +387,18 @@ class GeminiClient:
                 return {"success": False, "error": "No API keys available", "raw_text": ""}
 
             try:
-                client = genai.Client(api_key=key)
+                genai.configure(api_key=key)
+                model_instance = genai.GenerativeModel(model)
                 
-                config = types.GenerateContentConfig(
+                generation_config = genai.types.GenerationConfig(
                     temperature=temperature,
                     max_output_tokens=max_tokens,
                 )
 
                 start_time = time.time()
-                response = client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=config
+                response = model_instance.generate_content(
+                    prompt,
+                    generation_config=generation_config
                 )
                 latency = time.time() - start_time
 
