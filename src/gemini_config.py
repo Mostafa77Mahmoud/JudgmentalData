@@ -36,7 +36,7 @@ else:
     MAX_FABRICATION_RATE = float(os.getenv("MAX_FABRICATION_RATE", "0.10"))
     BATCH_SIZE = int(os.getenv("BATCH_SIZE", "4"))
     CONTEXT_MAX_CHARS = int(os.getenv("CONTEXT_MAX_CHARS", "2500"))
-    MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "512"))
+    MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "2048"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
     VERIFIER_MODEL = os.getenv("VERIFIER_MODEL", "gemini-1.5-flash")
     VERIFIER_TEMPERATURE = float(os.getenv("VERIFIER_TEMPERATURE", "0.0"))

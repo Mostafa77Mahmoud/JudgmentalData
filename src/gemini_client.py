@@ -89,6 +89,18 @@ def backoff_with_jitter(attempt: int) -> float:
     jitter = base * 0.2 * (random.random() * 2 - 1)
     return max(0.1, base + jitter)
 
+def extract_text(response):
+    """Extract text from response candidates properly"""
+    if not response.candidates:
+        return None
+    
+    parts = response.candidates[0].content.parts
+    texts = []
+    for p in parts:
+        if hasattr(p, "text"):
+            texts.append(p.text)
+    return "\n".join(texts) if texts else None
+
 def send_verify_request(model_name: str, api_key: str, prompt_text: str, max_tokens: int, attempt: int) -> str:
     """Send verification request using Google Generative AI SDK"""
     try:
@@ -109,9 +121,10 @@ def send_verify_request(model_name: str, api_key: str, prompt_text: str, max_tok
         # Save raw response for debugging
         raw_path = save_raw_response(response, f"verify_{model_name}", attempt)
 
-        # Check if response has text
-        if not hasattr(response, 'text') or not response.text:
-            # Check finish reason
+        # Extract text properly from response
+        result = extract_text(response)
+        if not result:
+            # Check finish reason for better error handling
             if hasattr(response, 'candidates') and response.candidates and len(response.candidates) > 0:
                 candidate = response.candidates[0]
                 if hasattr(candidate, 'finish_reason'):
@@ -120,10 +133,12 @@ def send_verify_request(model_name: str, api_key: str, prompt_text: str, max_tok
                         raise ValueError(f"Response truncated due to MAX_TOKENS. Increase max_output_tokens. Raw saved to {raw_path}")
                     elif finish_reason_name in ["SAFETY", "OTHER"]:
                         raise ValueError(f"Response blocked due to {finish_reason_name}. Raw saved to {raw_path}")
+                    elif finish_reason_name == "STOP":
+                        raise ValueError(f"Response completed but no text parts found. Raw saved to {raw_path}")
 
-            raise NoTextPartsError(f"No text parts found in response. Raw saved to {raw_path}")
+            raise ValueError(f"Empty response or no text parts. Raw saved to {raw_path}")
 
-        return response.text
+        return result
 
     except Exception as e:
         # Save error details
@@ -450,7 +465,7 @@ class GeminiClient:
                     self.key_states[key_index]["requests_made"] += 1
 
                 raw_path = save_raw_response(response, model, attempt)
-                response_text = response.text if hasattr(response, 'text') else ""
+                response_text = extract_text(response) or ""
 
                 return {
                     "success": True,
