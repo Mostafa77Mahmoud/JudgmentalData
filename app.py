@@ -331,13 +331,13 @@ def system_status_page():
             "Key Source": "config/keys.json",
             "Key Name": f"Key {i+1}",
             "Status": "✅ Set",
-            "Value": f"{key[:10]}..." if key else "Not set"
+            "Value": f"{str(key)[:10]}..." if key else "Not set"
         })
 
     # Display environment variables
     for key_name, key_value in env_keys:
         status = "✅ Set" if key_value else "❌ Missing"
-        masked_key = f"{key_value[:10]}..." if key_value else "Not set"
+        masked_key = f"{str(key_value)[:10]}..." if key_value else "Not set"
         # Avoid duplicating if key from config is the same as env var
         if key_name not in all_keys_info or all_keys_info[key_name] != key_value:
              key_status.append({

@@ -38,6 +38,25 @@ def save_raw_body(response, prefix):
         logger.error(f"Failed to save raw response to {path}: {e}")
         return None
 
+# Helper function to save raw bodies for debugging
+def save_raw_body(body: Dict, filename_prefix: str) -> str:
+    """Saves a dictionary to a JSON file with a timestamped filename."""
+    os.makedirs("logs/raw_bodies", exist_ok=True)
+    timestamp = int(time.time())
+    filepath = f"logs/raw_bodies/{filename_prefix}_{timestamp}.jsonl"
+    with open(filepath, "w", encoding="utf8") as f:
+        f.write(json.dumps(body, ensure_ascii=False) + "\n")
+    return filepath
+
+def save_raw_response(response_text: str, model: str, attempt: int) -> str:
+    """Save raw response for debugging"""
+    os.makedirs("raw", exist_ok=True)
+    timestamp = int(time.time())
+    filename = f"raw/{timestamp}_{attempt}_{model.replace('/', '_')}.resp.txt"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(response_text)
+    return filename
+
 
 def extract_text_from_parsed(body_dict: Dict) -> Optional[str]:
     """
@@ -441,7 +460,7 @@ class GeminiClient:
         # Use the centralized API keys
         self.api_keys = API_KEYS
         self.current_key_index = 0
-        self.key_states = {i: {"blocked_until": 0, "requests_made": 0, "last_response": None} 
+        self.key_states = {i: {"blocked_until": 0, "requests_made": 0, "last_response": None}
                           for i in range(len(self.api_keys))}
 
         # Create raw responses directory
@@ -578,7 +597,7 @@ class GeminiClient:
                 try:
                     save_raw_body(response, f"exception_{attempt+1}")
                 except NameError: # response might not be defined if error happened before its assignment
-                    pass 
+                    pass
 
                 if attempt < max_attempts - 1:
                     wait_time = 2 ** attempt  # Exponential backoff

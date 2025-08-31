@@ -15,15 +15,7 @@ from src.gemini_config import BATCH_SIZE, CONTEXT_MAX_CHARS, MAX_FABRICATION_RAT
 from src.parse_utils import parse_json_loose, compute_token_overlap, validate_example_schema, find_exact_substring
 from src.data_processor import DataProcessor
 
-# Helper function to save raw bodies for debugging
-def save_raw_body(body: Dict, filename_prefix: str) -> str:
-    """Saves a dictionary to a JSON file with a timestamped filename."""
-    os.makedirs("logs/raw_bodies", exist_ok=True)
-    timestamp = int(time.time())
-    filepath = f"logs/raw_bodies/{filename_prefix}_{timestamp}.jsonl"
-    with open(filepath, "w", encoding="utf8") as f:
-        f.write(json.dumps(body, ensure_ascii=False) + "\n")
-    return filepath
+
 
 class DatasetGenerator:
     """Production-ready dataset generator with strict reference verification"""
