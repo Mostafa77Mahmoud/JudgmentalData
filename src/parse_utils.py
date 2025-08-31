@@ -102,49 +102,46 @@ def normalize_text_for_overlap(text: str) -> str:
 
 def validate_example_schema(example: Dict,
                             required_fields: List[str]) -> Tuple[bool, str]:
-    """Validate example has required fields and proper data types"""
-
-    # Check required fields
+    """Validate that example contains all required fields and follows new schema"""
     for field in required_fields:
         if field not in example:
-            return False, f"Missing required field: {field}"
+            return False, f"Missing field: {field}"
 
-    # Check data types and constraints
-    if not isinstance(example.get("id"), str) or len(example["id"]) == 0:
-        return False, "id must be non-empty string"
+    # Check specific field types
+    if "label" in example and example["label"] not in ["True", "False", "Unknown"]:
+        return False, f"Invalid label: {example['label']}"
 
-    if example.get("language") not in ["ar", "en"]:
-        return False, "language must be 'ar' or 'en'"
+    if "confidence" in example:
+        try:
+            conf = float(example["confidence"])
+            if not (0.0 <= conf <= 1.0):
+                return False, f"Confidence must be between 0.0 and 1.0, got: {conf}"
+        except (ValueError, TypeError):
+            return False, f"Confidence must be a number, got: {example['confidence']}"
 
-    if not isinstance(example.get("claim"), str) or len(example["claim"]) == 0:
-        return False, "claim must be non-empty string"
+    # Validate evidence structure
+    if "evidence" in example:
+        evidence = example["evidence"]
+        if not isinstance(evidence, dict):
+            return False, "Evidence must be a dictionary"
 
-    if not isinstance(example.get("context_chunk_id"),
-                      int) or example["context_chunk_id"] < 0:
-        return False, "context_chunk_id must be non-negative integer"
+        required_evidence_fields = ["file_path", "excerpt", "start_char", "end_char", "match_type"]
+        for field in required_evidence_fields:
+            if field not in evidence:
+                return False, f"Missing evidence field: {field}"
 
-    # Check context excerpt length using config value
-    context_excerpt = example.get("context_excerpt", "")
-    if len(context_excerpt) > CONTEXT_MAX_CHARS:
-        return False, f"context_excerpt exceeds {CONTEXT_MAX_CHARS} characters (got {len(context_excerpt)})"
+        if evidence["match_type"] not in ["exact", "paraphrase", "inferred"]:
+            return False, f"Invalid match_type: {evidence['match_type']}"
 
-    if example.get("verdict") not in ["True", "False", "Unknown"]:
-        return False, "verdict must be 'True', 'False', or 'Unknown'"
+        # Check excerpt length
+        if len(evidence["excerpt"]) > 750:
+            return False, f"Evidence excerpt too long: {len(evidence['excerpt'])} > 750 chars"
 
-    if not isinstance(example.get("explanation"), str):
-        return False, "explanation must be string"
-
-    if not isinstance(example.get("reference"), str):
-        return False, "reference must be string"
-
-    if not isinstance(example.get("suspected_fabrication"), bool):
-        return False, "suspected_fabrication must be boolean"
-
-    if not isinstance(example.get("generator_model"), str):
-        return False, "generator_model must be string"
-
-    if not isinstance(example.get("meta"), dict):
-        return False, "meta must be dict"
+    # Validate explanation length (approximately 60 words)
+    if "explanation" in example:
+        word_count = len(example["explanation"].split())
+        if word_count > 80:  # Allow some flexibility
+            return False, f"Explanation too long: {word_count} words > 80 words"
 
     return True, "Valid"
 
