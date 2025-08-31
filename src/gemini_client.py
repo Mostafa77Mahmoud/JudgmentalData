@@ -7,7 +7,8 @@ import threading
 import re
 from typing import List, Dict, Optional, Tuple, Any, Union
 from pathlib import Path
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from src.gemini_config import API_KEYS, MODELS, BATCH_SIZE, MAX_RETRIES, CONTEXT_MAX_CHARS, VERIFIER_MODEL, VERIFIER_TEMPERATURE, MAX_OUTPUT_TOKENS, MAX_INPUT_TOKENS
 
 # Add missing constants
@@ -184,20 +185,21 @@ def _build_verify_prompt(items: List[Dict], lang: str) -> str:
         )
 
 def send_verify_request(model_name: str, api_key: str, items: List[Dict], lang: str, attempt: int) -> List[Dict]:
-    """Send structured verification request using Google Generative AI SDK"""
+    """Send structured verification request using Google GenAI SDK"""
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name)
-
-        # Structured output with very strict limits
-        generation_config = genai.GenerationConfig(
-            temperature=0.0,
-            max_output_tokens=1200,  # كافي لـ 5 عناصر مع شرح قصير
-            response_mime_type="application/json",
-            response_schema=_verify_schema())
+        client = genai.Client(api_key=api_key)
 
         prompt_text = _build_verify_prompt(items, lang)
-        response = model.generate_content(prompt_text, generation_config=generation_config)
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt_text,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=1200,
+                response_mime_type="application/json",
+                response_schema=_verify_schema()
+            )
+        )
 
         # Save raw response for debugging
         raw_path = save_raw_response(response, f"verify_{model_name}", attempt)
@@ -523,6 +525,7 @@ class GeminiClient:
             for i in range(len(self.api_keys))
         }
         Path("raw").mkdir(exist_ok=True)
+        self.client = None
 
     def _get_next_available_key(self) -> Tuple[Optional[str], int]:
         """Get next available API key"""
@@ -558,7 +561,7 @@ class GeminiClient:
                    max_tokens: int = 40000,
                    temperature: float = 0.0,
                    max_attempts: int = 3) -> Dict:
-        """Call Gemini model using Google Generative AI SDK"""
+        """Call Gemini model using Google GenAI SDK"""
 
         # Use available models from config
         available_models = MODELS + [
@@ -581,52 +584,47 @@ class GeminiClient:
                 }
 
             try:
-                genai.configure(api_key=key)
-                model_instance = genai.GenerativeModel(model)
-
-                generation_config = genai.GenerationConfig(
-                    temperature=temperature,
-                    max_output_tokens=min(max_tokens, 2000),  # Cap at 2000 for verification
-                    response_mime_type="application/json"
-                )
+                client = genai.Client(api_key=key)
 
                 # Check input token estimate
                 estimated_input_tokens = len(prompt) // 3  # Rough estimate
                 if estimated_input_tokens > MAX_INPUT_TOKENS:
-                    logger.warning(f"Input tokens ({estimated_input_tokens}) may exceed limit ({MAX_INPUT_TOKENS})")
+                    self.logger.warning(f"Input tokens ({estimated_input_tokens}) may exceed limit ({MAX_INPUT_TOKENS})")
 
                 start_time = time.time()
-                response = model_instance.generate_content(
-                    prompt, generation_config=generation_config)
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=temperature,
+                        max_output_tokens=min(max_tokens, 2000),
+                        response_mime_type="application/json"
+                    )
+                )
                 latency = time.time() - start_time
 
-                # Improve finish_reason handling
+                # Handle response with new SDK format
                 text_content = None
                 if response.candidates and len(response.candidates) > 0:
                     candidate = response.candidates[0]
 
                     # Check finish reason
-                    # finish_reason can be an enum or an integer.
-                    # 1: STOP (normal completion)
-                    # 2: MAX_TOKENS (truncated)
-                    # 3: SAFETY (content filtered)
-                    # 4: OTHER (unspecified error)
                     finish_reason = getattr(candidate, 'finish_reason', None)
-                    finish_reason_val = finish_reason.value if hasattr(finish_reason, 'name') else finish_reason
-
-                    if finish_reason_val not in [1, None]: # Allow STOP or if finish_reason is missing
+                    if finish_reason and finish_reason != 'STOP':
                         error_msg = f"Model finished with reason: {finish_reason}. Response may be incomplete or blocked."
                         self.logger.warning(error_msg)
-                        # Save raw response for manual review
                         raw_path = self._save_raw_response(response, prompt, attempt)
-                        # Raise an exception to indicate failure and provide context
                         raise Exception(f"{error_msg} Raw response saved to: {raw_path}")
 
+                    # Extract text from new SDK response format
                     if hasattr(candidate, 'content') and candidate.content and hasattr(candidate.content, 'parts'):
                         if candidate.content.parts:
-                            # Concatenate all text parts
                             text_parts = [part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text]
                             text_content = "\n".join(text_parts)
+                
+                # Fallback to response.text if available
+                if not text_content and hasattr(response, 'text'):
+                    text_content = response.text
 
 
                 # Update key state
