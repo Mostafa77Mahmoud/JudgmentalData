@@ -1,0 +1,4 @@
+{
+  "error": "No text attribute",
+  "raw": "{'error': '500 An internal error has occurred. Please retry or report in https://developers.generativeai.google/guide/troubleshooting', 'model': 'gemini-2.5-flash', 'attempt': 2, 'timestamp': 1756647782.1685913}"
+}
