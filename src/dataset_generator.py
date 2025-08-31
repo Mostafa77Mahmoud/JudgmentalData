@@ -20,6 +20,9 @@ from src.gemini_config import BATCH_SIZE, CONTEXT_MAX_CHARS, MAX_FABRICATION_RAT
 from src.parse_utils import parse_json_loose, compute_token_overlap, validate_example_schema, find_exact_substring
 from src.data_processor import DataProcessor
 
+# Set up logger
+logger = logging.getLogger(__name__)
+
 
 class DatasetGenerator:
     """Production-ready dataset generator using only Gemini models"""
@@ -553,13 +556,13 @@ Return ONLY valid JSON without any additional text:
                     failed_raw_paths.append(ex["raw_response_path"])
 
         # Apply fabrication post-processing
-        from .fabrication_checker import FabricationChecker
+        from src.fabrication_checker import FabricationChecker
         fab_checker = FabricationChecker(max_fabrication_rate=0.10)
         final_claims = fab_checker.post_process_results(verified_examples)
         quality_report = fab_checker.generate_quality_report(final_claims)
 
         # Log quality metrics
-        logger.info(f"Smoke Test Quality Report: {quality_report}")
+        self.logger.info(f"Smoke Test Quality Report: {quality_report}")
 
         # Save results
         self._save_smoke_test_results(final_claims, language)
@@ -575,6 +578,9 @@ Return ONLY valid JSON without any additional text:
     def _generate_claims_from_chunk(self, chunk, language, max_claims=3):
         """Generate claims from a single chunk of text."""
         try:
+            # Import prompts
+            from src.prompts import ARABIC_GENERATOR_PROMPT, ENGLISH_GENERATOR_PROMPT
+            
             # Get the appropriate prompt - strict mode
             if language == "ar":
                 prompt = ARABIC_GENERATOR_PROMPT.format(
