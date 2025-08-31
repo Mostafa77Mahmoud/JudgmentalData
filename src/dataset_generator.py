@@ -1,4 +1,3 @@
-
 import json
 import uuid
 import time
@@ -6,6 +5,7 @@ import random
 import re
 import argparse
 import sys
+import os
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 import logging
@@ -14,6 +14,16 @@ from src.gemini_client import GeminiClient, batch_verify, robust_parse_json_arra
 from src.gemini_config import BATCH_SIZE, CONTEXT_MAX_CHARS, MAX_FABRICATION_RATE
 from src.parse_utils import parse_json_loose, compute_token_overlap, validate_example_schema, find_exact_substring
 from src.data_processor import DataProcessor
+
+# Helper function to save raw bodies for debugging
+def save_raw_body(body: Dict, filename_prefix: str) -> str:
+    """Saves a dictionary to a JSON file with a timestamped filename."""
+    os.makedirs("logs/raw_bodies", exist_ok=True)
+    timestamp = int(time.time())
+    filepath = f"logs/raw_bodies/{filename_prefix}_{timestamp}.jsonl"
+    with open(filepath, "w", encoding="utf8") as f:
+        f.write(json.dumps(body, ensure_ascii=False) + "\n")
+    return filepath
 
 class DatasetGenerator:
     """Production-ready dataset generator with strict reference verification"""
@@ -54,20 +64,20 @@ class DatasetGenerator:
             # Try pre-chunked data first (preferred)
             ar_chunks_file = Path("inputs/arabic_chunks.json")
             en_chunks_file = Path("inputs/english_chunks.json")
-            
+
             if ar_chunks_file.exists() and en_chunks_file.exists():
                 self.processor.load_data()
                 self.logger.info("Loaded pre-chunked data from chunks.json files")
                 return
-                
+
             # Fallback to cleaned text files
             ar_cleaned = Path("inputs/arabic_cleaned.txt")
             en_cleaned = Path("inputs/english_cleaned.txt")
-            
+
             if ar_cleaned.exists() and en_cleaned.exists():
                 self.logger.warning("Chunks files missing, falling back to cleaned text files")
                 self.processor.load_data()  # This will trigger auto-chunking
-                
+
                 # Save generated chunks for future use
                 derived_chunks_file = Path("inputs/derived_chunks_from_cleaned.json")
                 chunks_data = {
@@ -79,7 +89,7 @@ class DatasetGenerator:
                 self.logger.info(f"Saved derived chunks to {derived_chunks_file}")
             else:
                 raise FileNotFoundError("Neither chunks.json nor cleaned.txt files found")
-                
+
         except Exception as e:
             self.logger.error(f"Failed to load data sources: {e}")
             raise
@@ -257,11 +267,26 @@ class DatasetGenerator:
 
             chunk_text = chunks[chunk_id].get("text", "")
 
+            # Truncate context excerpt if too long
+            MAX_EXCERPT_CHARS = 512
+            if "context_excerpt" in candidate and len(candidate["context_excerpt"]) > MAX_EXCERPT_CHARS:
+                self.logger.warning("Context excerpt exceeds %d characters, truncating", MAX_EXCERPT_CHARS)
+                original_len = len(candidate["context_excerpt"])
+                candidate["context_excerpt"] = candidate["context_excerpt"][:MAX_EXCERPT_CHARS-3] + "..."
+
+                # Log invalid excerpt for manual review
+                os.makedirs("data", exist_ok=True)
+                with open("data/invalid_excerpts.jsonl", "a", encoding="utf8") as f:
+                    f.write(json.dumps({
+                        "id": candidate.get("id", "unknown"),
+                        "original_excerpt_len": original_len
+                    }) + "\n")
+
             # Try local verification first
             is_local_verified, local_result = self._local_verify_one(
                 claim, chunk_text, item_id, chunk_id, language, seed_id
             )
-            
+
             if is_local_verified and local_result:
                 verified.append(local_result)
                 continue
@@ -304,10 +329,10 @@ class DatasetGenerator:
         """Local deterministic verification before sending to model"""
         if not claim.strip():
             return False, None
-            
+
         # Truncate context to safe limit
         context = context[:CONTEXT_MAX_CHARS]
-        
+
         # Exact substring match (casefold for English, exact for Arabic)
         if language == "en":
             if claim.lower() in context.lower():
@@ -341,7 +366,7 @@ class DatasetGenerator:
                     "raw_response_path": "",
                     "meta": {"confidence": 0.99, "seed_id": seed_id}
                 }
-        
+
         # Token overlap heuristic
         claim_tokens = set(claim.split())
         context_tokens = set(context.split())
@@ -363,30 +388,30 @@ class DatasetGenerator:
                     "raw_response_path": "",
                     "meta": {"confidence": 0.95, "seed_id": seed_id}
                 }
-        
+
         return False, None
 
     def _batch_verify_with_model(self, candidates: List[Dict], language: str, batch_size: int = None, single_verify: bool = False) -> List[Dict]:
         """Verify candidates using model in batches"""
         if batch_size is None:
             batch_size = BATCH_SIZE
-            
+
         if single_verify:
             self.logger.info("Using single verification mode")
             return batch_verify_single(candidates)
-            
+
         verified = []
         chunks = self.processor.arabic_chunks if language == "ar" else self.processor.english_chunks
 
         for i in range(0, len(candidates), batch_size):
             batch = candidates[i:i + batch_size]
-            
+
             # Prepare items for batch verification
             items = []
             for candidate in batch:
                 chunk_id = candidate.get("context_chunk_id", 0)
                 chunk_text = chunks[chunk_id].get("text", "") if chunk_id < len(chunks) else ""
-                
+
                 items.append({
                     "id": candidate["id"],
                     "claim": candidate["claim"],
@@ -403,7 +428,7 @@ class DatasetGenerator:
                 # Fallback to single verification
                 self.logger.info("Falling back to single verification")
                 verifications = batch_verify_single(items)
-            
+
             # Apply verification results
             for j, verification in enumerate(verifications):
                 if j >= len(batch) or verification is None:
@@ -412,7 +437,7 @@ class DatasetGenerator:
                     candidate.update({
                         "verdict": "False",
                         "reference": "UNKNOWN",
-                        "explanation": "Verification failed", 
+                        "explanation": "Verification failed",
                         "suspected_fabrication": True,
                         "raw_response_path": "",
                         "meta": {**candidate.get("meta", {}), "confidence": 0.0}
@@ -421,11 +446,11 @@ class DatasetGenerator:
                     continue
 
                 candidate = batch[j]
-                
+
                 # Validate reference if verdict is True
                 chunk_text = chunks[candidate["context_chunk_id"]].get("text", "") if candidate["context_chunk_id"] < len(chunks) else ""
                 reference = verification.get("reference", "UNKNOWN")
-                if (verification.get("verdict") == "True" and 
+                if (verification.get("verdict") == "True" and
                     reference != "UNKNOWN" and
                     reference not in chunk_text):
                     # Invalid reference, mark as False
@@ -442,7 +467,7 @@ class DatasetGenerator:
                     "suspected_fabrication": verification.get("suspected_fabrication", True),
                     "raw_response_path": verification.get("raw_response_path", ""),
                     "meta": {
-                        **candidate.get("meta", {}), 
+                        **candidate.get("meta", {}),
                         "confidence": verification.get("confidence", 0.0)
                     }
                 })
@@ -494,11 +519,11 @@ class DatasetGenerator:
             "max_fabrication_threshold": MAX_FABRICATION_RATE,
             "success": stats["fabrication_rate"] <= MAX_FABRICATION_RATE
         }
-        
+
         summary_file = f"data/generation_stage_B/{language}/smoke_test_summary.json"
         with open(summary_file, "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
-            
+
         return summary_file
 
     def run_smoke_test(self, language: str, target_count: int = 15) -> Dict:
@@ -521,7 +546,7 @@ class DatasetGenerator:
         if needs_model:
             model_verified = self._batch_verify_with_model(needs_model, language, batch_size=4)
             all_examples = locally_verified + model_verified
-            
+
             # Collect failed raw paths
             for ex in model_verified:
                 if ex.get("suspected_fabrication") and ex.get("raw_response_path"):
@@ -545,7 +570,7 @@ class DatasetGenerator:
                 f.write(json.dumps(example, ensure_ascii=False) + "\n")
 
         stats = self._compute_stats(valid_examples)
-        
+
         # Save summary report
         summary_file = self._save_smoke_test_summary(language, stats, valid_examples, failed_raw_paths)
 
