@@ -1,4 +1,3 @@
-
 {
   "API_KEYS": [
     "AIzaSyAspAo_UHjOCKxbmtaPCtldZ7g6XowHoV4",
@@ -11,5 +10,5 @@
   "MAX_FABRICATION_RATE": 0.10,
   "BATCH_SIZE": 4,
   "CONTEXT_MAX_CHARS": 800,
-  "MAX_OUTPUT_TOKENS": 8192
+  "MAX_OUTPUT_TOKENS": 4096
 }

@@ -93,12 +93,22 @@ def extract_text(response):
     """Extract text from response candidates properly"""
     if not response.candidates:
         return None
-    
-    parts = response.candidates[0].content.parts
+
+    candidate = response.candidates[0]
+
+    # Check if content exists and has parts
+    if not hasattr(candidate, 'content') or not candidate.content:
+        return None
+
+    if not hasattr(candidate.content, 'parts') or not candidate.content.parts:
+        return None
+
+    parts = candidate.content.parts
     texts = []
     for p in parts:
-        if hasattr(p, "text"):
+        if hasattr(p, "text") and p.text:
             texts.append(p.text)
+
     return "\n".join(texts) if texts else None
 
 def send_verify_request(model_name: str, api_key: str, prompt_text: str, max_tokens: int, attempt: int) -> str:
@@ -131,12 +141,23 @@ def send_verify_request(model_name: str, api_key: str, prompt_text: str, max_tok
                     finish_reason_name = candidate.finish_reason.name if hasattr(candidate.finish_reason, 'name') else str(candidate.finish_reason)
                     if finish_reason_name == "MAX_TOKENS":
                         raise ValueError(f"Response truncated due to MAX_TOKENS. Increase max_output_tokens. Raw saved to {raw_path}")
-                    elif finish_reason_name in ["SAFETY", "OTHER"]:
-                        raise ValueError(f"Response blocked due to {finish_reason_name}. Raw saved to {raw_path}")
                     elif finish_reason_name == "STOP":
                         raise ValueError(f"Response completed but no text parts found. Raw saved to {raw_path}")
 
             raise ValueError(f"Empty response or no text parts. Raw saved to {raw_path}")
+
+        # Check finish reason
+        if response.candidates and response.candidates[0].finish_reason:
+            finish_reason = response.candidates[0].finish_reason
+            if finish_reason == 2:  # MAX_TOKENS
+                # Try to extract partial text first
+                partial_text = extract_text(response)
+                if partial_text and len(partial_text) > 100:  # If we got some reasonable text
+                    logger.warning(f"Response truncated but got partial text ({len(partial_text)} chars)")
+                    return partial_text
+                raise ValueError(f"Response truncated due to MAX_TOKENS. Increase max_output_tokens. Raw saved to {raw_path}")
+            elif finish_reason in [3, 4]:  # SAFETY, RECITATION
+                raise ValueError(f"Response blocked due to safety/recitation (reason: {finish_reason}). Raw saved to {raw_path}")
 
         return result
 
@@ -179,12 +200,12 @@ def robust_parse_json_array(text: str) -> Optional[List[Dict]]:
 
     # Clean the response text more thoroughly
     text = text.strip()
-    
+
     # Remove all markdown blocks
     import re
     text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
     text = re.sub(r'```\s*$', '', text, flags=re.MULTILINE)
-    
+
     # Remove any leading/trailing explanatory text
     text = re.sub(r'^[^[\{]*', '', text)  # Remove text before JSON starts
     text = re.sub(r'[^\]\}]*$', '', text)  # Remove text after JSON ends
@@ -219,7 +240,7 @@ def robust_parse_json_array(text: str) -> Optional[List[Dict]]:
             text += ']' * (text.count('[') - text.count(']'))
         if text.count('{') > text.count('}'):
             text += '}' * (text.count('{') - text.count('}'))
-        
+
         parsed = json.loads(text)
         if isinstance(parsed, list):
             return parsed
@@ -267,7 +288,7 @@ Output format - ONLY JSON array, no markdown blocks:
 [
   {
     "id": "copy_from_input",
-    "language": "copy_from_input", 
+    "language": "copy_from_input",
     "claim": "copy_from_input",
     "context_chunk_id": copy_number_from_input,
     "context_excerpt": "copy_from_input",
@@ -286,7 +307,7 @@ def prepare_verifier_request(items: List[Dict], max_tokens: int) -> str:
     """Prepare verification request with language-specific prompts"""
     # Detect language from first item
     language = items[0].get("language", "en") if items else "en"
-    
+
     try:
         from src.prompts import ARABIC_VERIFIER_PROMPT, ENGLISH_VERIFIER_PROMPT
         if language == "ar":
@@ -296,7 +317,7 @@ def prepare_verifier_request(items: List[Dict], max_tokens: int) -> str:
     except ImportError:
         # Fallback to default prompt
         base_prompt = VERIFIER_PROMPT
-    
+
     return base_prompt + "\n\nINPUT_ITEMS:\n" + json.dumps(items, ensure_ascii=False)
 
 def batch_verify(items: List[Dict]) -> List[Dict]:
@@ -310,7 +331,7 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
     # Calculate tokens conservatively based on language
     language = items[0].get("language", "en") if items else "en"
     est_tokens_per_item = 800 if language == "ar" else 400  # Arabic needs more tokens
-    
+
     # Use smaller max tokens to avoid truncation
     max_tokens = min(MAX_OUTPUT_TOKENS, est_tokens_per_item * max(1, len(items)))
 
@@ -454,6 +475,7 @@ class GeminiClient:
                 generation_config = genai.GenerationConfig(
                     temperature=temperature,
                     max_output_tokens=max_tokens,
+                    response_mime_type="application/json",
                 )
 
                 start_time = time.time()

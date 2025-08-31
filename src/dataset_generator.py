@@ -21,6 +21,7 @@ class DatasetGenerator:
     """Production-ready dataset generator with strict reference verification"""
 
     def __init__(self, config_path: str = "config/keys.json"):
+        """Initialize the dataset generator with configuration."""
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -34,6 +35,10 @@ class DatasetGenerator:
         self._load_data_sources()
 
         self._load_seeds()
+
+        # Load context max chars from config
+        from .gemini_config import CONTEXT_MAX_CHARS
+        self.context_max_chars = CONTEXT_MAX_CHARS
 
         self.required_fields = [
             "id", "language", "claim", "context_chunk_id", "context_excerpt",
@@ -130,8 +135,8 @@ class DatasetGenerator:
             if overlap > best_overlap:
                 best_overlap = overlap
                 best_chunk_id = i
-                # Extract excerpt (first 512 chars or around the match)
-                best_excerpt = chunk_text[:CONTEXT_MAX_CHARS]
+                # Extract excerpt (first CONTEXT_MAX_CHARS chars or around the match)
+                best_excerpt = chunk_text[:self.context_max_chars]
 
         return best_chunk_id, best_excerpt
 
@@ -222,7 +227,7 @@ class DatasetGenerator:
             for variant in false_variants:
                 # Use a different chunk for context shift
                 wrong_chunk_id = (chunk_id + random.randint(5, 15)) % len(chunks)
-                wrong_excerpt = chunks[wrong_chunk_id].get("text", "")[:CONTEXT_MAX_CHARS]
+                wrong_excerpt = chunks[wrong_chunk_id].get("text", "")[:self.context_max_chars]
 
                 false_candidate = {
                     "id": str(uuid.uuid4()),
@@ -261,12 +266,12 @@ class DatasetGenerator:
 
             chunk_text = chunks[chunk_id].get("text", "")
 
-            # Truncate context to safe limit
-            MAX_EXCERPT_CHARS = 512
-            if "context_excerpt" in candidate and len(candidate["context_excerpt"]) > MAX_EXCERPT_CHARS:
-                self.logger.warning("Context excerpt exceeds %d characters, truncating", MAX_EXCERPT_CHARS)
+            # Truncate context if too long
+            max_context_chars = getattr(self, 'context_max_chars', 2500)
+            if "context_excerpt" in candidate and len(candidate["context_excerpt"]) > max_context_chars:
                 original_len = len(candidate["context_excerpt"])
-                candidate["context_excerpt"] = candidate["context_excerpt"][:MAX_EXCERPT_CHARS-3] + "..."
+                candidate["context_excerpt"] = candidate["context_excerpt"][:max_context_chars]
+                self.logger.warning(f"Context excerpt exceeds {max_context_chars} characters, truncating")
 
                 # Log invalid excerpt for manual review
                 os.makedirs("data", exist_ok=True)
@@ -325,7 +330,7 @@ class DatasetGenerator:
             return False, None
 
         # Truncate context to safe limit
-        context = context[:CONTEXT_MAX_CHARS]
+        context = context[:self.context_max_chars]
 
         # Exact substring match (casefold for English, exact for Arabic)
         if language == "en":
@@ -414,7 +419,7 @@ class DatasetGenerator:
                 items.append({
                     "id": candidate["id"],
                     "claim": candidate["claim"],
-                    "context_excerpt": chunk_text[:CONTEXT_MAX_CHARS],
+                    "context_excerpt": chunk_text[:self.context_max_chars],
                     "language": language,
                     "context_chunk_id": chunk_id
                 })
