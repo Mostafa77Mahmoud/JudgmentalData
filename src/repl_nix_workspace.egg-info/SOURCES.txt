@@ -7,6 +7,7 @@ src/gemini_client.py
 src/gemini_config.py
 src/knowledge_base.py
 src/parse_utils.py
+src/prompts.py
 src/reference_verifier.py
 src/repl_nix_workspace.egg-info/PKG-INFO
 src/repl_nix_workspace.egg-info/SOURCES.txt
