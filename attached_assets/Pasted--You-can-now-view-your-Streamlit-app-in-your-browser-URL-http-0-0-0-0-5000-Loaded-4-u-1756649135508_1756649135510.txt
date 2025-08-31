@@ -1,0 +1,39 @@
+
+  You can now view your Streamlit app in your browser.
+
+  URL: http://0.0.0.0:5000
+
+Loaded 4 unique API keys
+Loaded 2 models from config: ['gemini-2.5-flash', 'gemini-2.5-flash-lite']
+2025-08-31 14:04:57,929 - src.dataset_generator - INFO - Loaded pre-chunked data from chunks.json files
+2025-08-31 14:04:57,933 - src.dataset_generator - INFO - Loaded 610 Arabic seeds, 575 English seeds
+2025-08-31 14:05:00,266 - src.dataset_generator - INFO - Starting smoke test for ar with 20 examples
+2025-08-31 14:05:04,508 - src.dataset_generator - INFO - Generated 27 candidates
+2025-08-31 14:05:04,509 - src.dataset_generator - INFO - Local verification: 7 verified, 20 need model
+2025-08-31 14:05:04,509 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,509 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,509 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,509 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,509 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,509 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
+2025-08-31 14:05:04,510 - src.dataset_generator - WARNING - Invalid example: context_excerpt exceeds 512 characters
