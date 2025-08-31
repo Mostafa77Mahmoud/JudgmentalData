@@ -6,3 +6,15 @@ channel = "stable-25_05"
 
 [deployment]
 run = ["sh", "-c", "python app.py"]
+
+[workflows]
+runButton = "Run Pipeline"
+
+[[workflows.workflow]]
+name = "Run Pipeline"
+author = 47083209
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python main.py --smoke --lang ar"

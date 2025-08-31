@@ -1,77 +1,84 @@
+
 #!/usr/bin/env python3
-"""
-Smoke test validation script for AAOIFI dataset generation
-"""
-import argparse
 import json
-import os
-from pathlib import Path
+import argparse
 import sys
+from pathlib import Path
+from typing import Dict, List
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+def validate_smoke_test(lang: str, count: int) -> Dict:
+    """Validate smoke test results"""
+    
+    # Check for smoke test output file
+    output_files = list(Path(f"data/generation_stage_B/{lang}").glob(f"smoke_test_{lang}_*.jsonl"))
+    if not output_files:
+        return {"success": False, "error": "No smoke test output files found"}
+        
+    latest_file = max(output_files, key=lambda x: x.stat().st_mtime)
+    
+    try:
+        examples = []
+        with open(latest_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                examples.append(json.loads(line.strip()))
+                
+        # Compute metrics
+        total = len(examples)
+        true_count = sum(1 for ex in examples if ex.get("verdict") == "True")
+        false_count = sum(1 for ex in examples if ex.get("verdict") == "False")
+        fabrication_count = sum(1 for ex in examples if ex.get("suspected_fabrication") == True)
+        
+        # Schema validation
+        required_fields = [
+            "id", "language", "claim", "context_chunk_id", "context_excerpt",
+            "verdict", "explanation", "reference", "suspected_fabrication",
+            "generator_model", "meta"
+        ]
+        
+        valid_count = 0
+        for ex in examples:
+            if all(field in ex for field in required_fields):
+                valid_count += 1
+                
+        fabrication_rate = fabrication_count / total if total > 0 else 0.0
+        schema_valid_rate = valid_count / total if total > 0 else 0.0
+        
+        # Success criteria
+        success = (
+            total >= count * 0.8 and 
+            schema_valid_rate >= 0.9 and 
+            fabrication_rate <= 0.05
+        )
+        
+        return {
+            "success": success,
+            "total_examples": total,
+            "true_count": true_count,
+            "false_count": false_count,
+            "fabrication_count": fabrication_count,
+            "fabrication_rate": fabrication_rate,
+            "schema_valid_rate": schema_valid_rate,
+            "output_file": str(latest_file),
+            "sample_examples": examples[:3]
+        }
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
-from src.dataset_generator import DatasetGenerator
 
 def main():
-    parser = argparse.ArgumentParser(description="Run AAOIFI smoke test")
-    parser.add_argument("--lang", choices=["ar", "en"], required=True, help="Language to test")
-    parser.add_argument("--count", type=int, default=20, help="Number of examples to generate")
-
+    parser = argparse.ArgumentParser(description="Validate smoke test results")
+    parser.add_argument("--lang", choices=["ar", "en"], required=True, help="Language")
+    parser.add_argument("--count", type=int, default=20, help="Expected count")
+    
     args = parser.parse_args()
+    
+    results = validate_smoke_test(args.lang, args.count)
+    print(json.dumps(results, indent=2, ensure_ascii=False))
+    
+    if not results.get("success"):
+        sys.exit(1)
 
-    # Check for API keys
-    api_keys = [
-        os.getenv("GEMINI_KEY_1"),
-        os.getenv("GEMINI_KEY_2"),
-        os.getenv("GEMINI_KEY_3"),
-        os.getenv("GEMINI_KEY_4")
-    ]
-
-    valid_keys = [key for key in api_keys if key]
-    if not valid_keys:
-        print("ERROR: No valid API keys found. Set GEMINI_KEY_1 through GEMINI_KEY_4 in Secrets.")
-        return 1
-
-    print(f"Found {len(valid_keys)} valid API keys")
-
-    try:
-        # Initialize generator
-        generator = DatasetGenerator(valid_keys)
-
-        # Run smoke test
-        results = generator.run_smoke_test(args.lang, args.count)
-
-        # Print results as JSON
-        print("\n" + "="*50)
-        print("SMOKE TEST RESULTS")
-        print("="*50)
-        print(json.dumps(results, indent=2, ensure_ascii=False))
-
-        # Print summary
-        if results["success"]:
-            print(f"\n✅ SMOKE TEST PASSED for {args.lang}")
-            stats = results["stats"]
-            print(f"Valid rate: {stats['valid_rate']:.1%}")
-            print(f"Fabrication rate: {stats['fabrication_rate']:.1%}")
-            print(f"Generated: {stats['valid_count']} valid examples")
-            return 0
-        else:
-            print(f"\n❌ SMOKE TEST FAILED for {args.lang}")
-            print(f"Error: {results.get('error', 'Unknown error')}")
-
-            if "failure_reasons" in results:
-                print("\nTop failure reasons:")
-                for reason, count in list(results["failure_reasons"].items())[:5]:
-                    print(f"  {reason}: {count}")
-
-            return 1
-
-    except Exception as e:
-        print(f"EXCEPTION during smoke test: {e}")
-        import traceback
-        traceback.print_exc()
-        return 1
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

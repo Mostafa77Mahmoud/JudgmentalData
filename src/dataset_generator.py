@@ -1,3 +1,4 @@
+
 import json
 import uuid
 import time
@@ -10,27 +11,27 @@ from pathlib import Path
 import logging
 
 from src.gemini_client import GeminiClient
-from src.parse_utils import parse_json_loose, compute_token_overlap, validate_example_schema
+from src.parse_utils import parse_json_loose, compute_token_overlap, validate_example_schema, find_exact_substring
 from src.data_processor import DataProcessor
 
-
 class DatasetGenerator:
-    """Generates judgmental verification datasets with batched processing and two-stage verification"""
+    """Production-ready dataset generator with strict reference verification"""
 
     def __init__(self, config_path: str = "config/keys.json"):
         logging.basicConfig(
             level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
         self.logger = logging.getLogger(__name__)
 
         self._create_directories()
-
+        
         self.gemini_client = GeminiClient(config_path)
         self.processor = DataProcessor()
         self.processor.load_data()
 
         self._load_seeds()
-
+        
         self.required_fields = [
             "id", "language", "claim", "context_chunk_id", "context_excerpt",
             "verdict", "explanation", "reference", "suspected_fabrication",
@@ -41,7 +42,7 @@ class DatasetGenerator:
         """Create necessary output directories"""
         directories = [
             "data/generation_stage_B/ar", "data/generation_stage_B/en",
-            "output/alpaca", "archive", "config", "raw"
+            "output/alpaca", "raw", "logs", "progress"
         ]
         for directory in directories:
             Path(directory).mkdir(parents=True, exist_ok=True)
@@ -49,306 +50,520 @@ class DatasetGenerator:
     def _load_seeds(self):
         """Load QA pairs as generation seeds"""
         try:
-            with open("inputs/arabic_qa_pairs.json", 'r',
-                      encoding='utf-8') as f:
-                self.arabic_seeds = json.load(f)
-            with open("inputs/english_qa_pairs.json", 'r',
-                      encoding='utf-8') as f:
-                self.english_seeds = json.load(f)
-            self.logger.info(
-                f"Loaded {len(self.arabic_seeds)} Arabic seeds, {len(self.english_seeds)} English seeds"
-            )
+            # Try both possible filenames
+            ar_files = ["inputs/arabic_qa_pairs.json", "inputs/arabic_qa_pairs (2000).json"]
+            en_files = ["inputs/english_qa_pairs.json", "inputs/english_qa_pairs (2000).json"]
+            
+            self.arabic_seeds = None
+            for ar_file in ar_files:
+                if Path(ar_file).exists():
+                    with open(ar_file, 'r', encoding='utf-8') as f:
+                        self.arabic_seeds = json.load(f)
+                    break
+                    
+            self.english_seeds = None
+            for en_file in en_files:
+                if Path(en_file).exists():
+                    with open(en_file, 'r', encoding='utf-8') as f:
+                        self.english_seeds = json.load(f)
+                    break
+                    
+            if not self.arabic_seeds or not self.english_seeds:
+                raise FileNotFoundError("Could not find QA pairs files")
+                
+            self.logger.info(f"Loaded {len(self.arabic_seeds)} Arabic seeds, {len(self.english_seeds)} English seeds")
         except Exception as e:
             self.logger.error(f"Failed to load seeds: {e}")
             raise
 
-    def _normalize_language(self, language_input: str) -> Optional[str]:
-        lang = str(language_input).lower().strip()
-        if lang in ['ar', 'arabic']: return 'ar'
-        if lang in ['en', 'english']: return 'en'
-        self.logger.error(
-            f"Unsupported language: '{language_input}'. Use 'ar' or 'en'.")
-        return None
+    def _get_best_chunk_for_claim(self, claim: str, language: str) -> Tuple[int, str]:
+        """Find best matching chunk for a claim"""
+        chunks = self.processor.arabic_chunks if language == "ar" else self.processor.english_chunks
+        
+        best_chunk_id = 0
+        best_overlap = 0.0
+        best_excerpt = ""
+        
+        for i, chunk in enumerate(chunks):
+            chunk_text = chunk.get("text", "")
+            overlap = compute_token_overlap(claim, chunk_text)
+            
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_chunk_id = i
+                # Extract excerpt (first 512 chars or around the match)
+                best_excerpt = chunk_text[:512]
+                
+        return best_chunk_id, best_excerpt
 
-    def _get_batch_generation_prompt(self, language: str, seeds: List[Dict],
-                                     chunks: List[Dict],
-                                     batch_size: int) -> str:
-        limited_seeds = seeds[:batch_size]
-        limited_chunks = []
-        for chunk in chunks[:3]:
-            chunk_text = chunk.get("text", "")[:1000]
-            limited_chunks.append({
-                "chunk_id": chunk.get("chunk_id", 0),
-                "text": chunk_text
-            })
-        template = {
-            "id": "uuid4",
-            "language": language,
-            "claim": "claim_text",
-            "context_chunk_id": 0,
-            "context_excerpt": "excerpt≤512",
-            "verdict": "True|False",
-            "explanation": "≤120chars",
-            "reference": "exact_text_or_UNKNOWN",
-            "suspected_fabrication": False,
-            "generator_model": "models/gemini-2.5-flash",
-            "meta": {
-                "confidence": 0.8
+    def _create_false_variants(self, claim: str, language: str) -> List[str]:
+        """Create deterministic false variants of a claim"""
+        variants = []
+        
+        if language == "ar":
+            # Arabic polarity flips
+            if "يجوز" in claim:
+                variants.append(claim.replace("يجوز", "لا يجوز"))
+            elif "لا يجوز" in claim:
+                variants.append(claim.replace("لا يجوز", "يجوز"))
+            elif "مباح" in claim:
+                variants.append(claim.replace("مباح", "محرم"))
+            elif "محرم" in claim:
+                variants.append(claim.replace("محرم", "مباح"))
+                
+            # Standard number changes
+            std_match = re.search(r'رقم (\d+)', claim)
+            if std_match:
+                current_num = int(std_match.group(1))
+                new_num = current_num + 1 if current_num < 50 else current_num - 1
+                variants.append(claim.replace(f"رقم {current_num}", f"رقم {new_num}"))
+                
+        else:
+            # English polarity flips
+            if "permissible" in claim.lower():
+                variants.append(claim.replace("permissible", "prohibited"))
+                variants.append(claim.replace("Permissible", "Prohibited"))
+            elif "prohibited" in claim.lower():
+                variants.append(claim.replace("prohibited", "permissible"))
+                variants.append(claim.replace("Prohibited", "Permissible"))
+            elif "allowed" in claim.lower():
+                variants.append(claim.replace("allowed", "forbidden"))
+                variants.append(claim.replace("Allowed", "Forbidden"))
+                
+            # Standard number changes
+            std_match = re.search(r'Standard (\d+)', claim)
+            if std_match:
+                current_num = int(std_match.group(1))
+                new_num = current_num + 1 if current_num < 50 else current_num - 1
+                variants.append(claim.replace(f"Standard {current_num}", f"Standard {new_num}"))
+                
+        # Date shifts
+        year_match = re.search(r'(\d{4})', claim)
+        if year_match:
+            current_year = int(year_match.group(1))
+            variants.append(claim.replace(str(current_year), str(current_year + 1)))
+            
+        return variants[:2]  # Return max 2 variants
+
+    def _generate_candidates_from_seeds(self, seeds: List[Dict], language: str) -> List[Dict]:
+        """Generate candidates from QA seeds using local methods"""
+        candidates = []
+        chunks = self.processor.arabic_chunks if language == "ar" else self.processor.english_chunks
+        
+        for i, seed in enumerate(seeds):
+            # Extract claim from answer or question
+            claim = seed.get("answer", seed.get("question", "")).strip()
+            if not claim:
+                continue
+                
+            seed_id = seed.get("id", f"seed_{i}")
+            
+            # Get best chunk match
+            chunk_id, excerpt = self._get_best_chunk_for_claim(claim, language)
+            
+            # Create True candidate
+            true_candidate = {
+                "id": str(uuid.uuid4()),
+                "language": language,
+                "claim": claim,
+                "context_chunk_id": chunk_id,
+                "context_excerpt": excerpt,
+                "verdict": "True",
+                "explanation": "",
+                "reference": "",
+                "suspected_fabrication": False,
+                "generator_model": "local",
+                "raw_response_path": "",
+                "meta": {"confidence": 0.0, "seed_id": seed_id}
             }
-        }
-        prompt = f"""Generate {batch_size} AAOIFI verification examples. Return JSON array only.
+            candidates.append(true_candidate)
+            
+            # Create False variants
+            false_variants = self._create_false_variants(claim, language)
+            for variant in false_variants:
+                # Use a different chunk for context shift
+                wrong_chunk_id = (chunk_id + random.randint(5, 15)) % len(chunks)
+                wrong_excerpt = chunks[wrong_chunk_id].get("text", "")[:512]
+                
+                false_candidate = {
+                    "id": str(uuid.uuid4()),
+                    "language": language,
+                    "claim": variant,
+                    "context_chunk_id": wrong_chunk_id,
+                    "context_excerpt": wrong_excerpt,
+                    "verdict": "False",
+                    "explanation": "",
+                    "reference": "UNKNOWN",
+                    "suspected_fabrication": True,
+                    "generator_model": "local",
+                    "raw_response_path": "",
+                    "meta": {"confidence": 1.0, "seed_id": seed_id}
+                }
+                candidates.append(false_candidate)
+                
+        return candidates
 
-TEMPLATE: {json.dumps(template, ensure_ascii=False)}
-RULES:
-- If chunk has exact match→verdict:True, reference:exact_substring
-- Else→verdict:False, reference:UNKNOWN, suspected_fabrication:true
-- Keep explanations under 120 chars
-- Use provided seeds/chunks only
-DATA: {json.dumps({"seeds": limited_seeds, "chunks": limited_chunks}, ensure_ascii=False)}
-JSON ARRAY:"""
+    def _local_pre_verification(self, candidates: List[Dict], language: str) -> Tuple[List[Dict], List[Dict]]:
+        """Perform local verification without model calls"""
+        verified = []
+        needs_model_verification = []
+        chunks = self.processor.arabic_chunks if language == "ar" else self.processor.english_chunks
+        
+        for candidate in candidates:
+            chunk_id = candidate.get("context_chunk_id", 0)
+            claim = candidate.get("claim", "")
+            
+            if chunk_id >= len(chunks):
+                continue
+                
+            chunk_text = chunks[chunk_id].get("text", "")
+            
+            # Check for exact substring match
+            exact_match = find_exact_substring(claim, chunk_text)
+            if exact_match:
+                candidate.update({
+                    "verdict": "True",
+                    "reference": exact_match[:200],  # Limit reference length
+                    "explanation": f"Exact match found: {exact_match[:120]}",
+                    "suspected_fabrication": False,
+                    "meta": {**candidate["meta"], "confidence": 1.0}
+                })
+                verified.append(candidate)
+                continue
+                
+            # Check token overlap
+            overlap = compute_token_overlap(claim, chunk_text)
+            if overlap >= 0.75:
+                # Find best matching substring
+                reference_substring = self._find_best_reference_substring(claim, chunk_text)
+                candidate.update({
+                    "verdict": "True",
+                    "reference": reference_substring,
+                    "explanation": f"High overlap match: {reference_substring[:120]}",
+                    "suspected_fabrication": False,
+                    "meta": {**candidate["meta"], "confidence": overlap}
+                })
+                verified.append(candidate)
+                continue
+                
+            # For False candidates created locally, they're already correctly labeled
+            if candidate.get("verdict") == "False" and candidate.get("generator_model") == "local":
+                candidate.update({
+                    "explanation": "Deterministic false variant",
+                    "meta": {**candidate["meta"], "confidence": 1.0}
+                })
+                verified.append(candidate)
+                continue
+                
+            # Needs model verification
+            needs_model_verification.append(candidate)
+            
+        self.logger.info(f"Local verification: {len(verified)} verified, {len(needs_model_verification)} need model")
+        return verified, needs_model_verification
+
+    def _find_best_reference_substring(self, claim: str, chunk_text: str) -> str:
+        """Find best matching substring in chunk for reference"""
+        claim_words = claim.split()
+        chunk_words = chunk_text.split()
+        
+        best_match = ""
+        best_score = 0
+        
+        # Try different window sizes
+        for window_size in range(min(len(claim_words), 20), 0, -1):
+            for i in range(len(chunk_words) - window_size + 1):
+                window = " ".join(chunk_words[i:i+window_size])
+                overlap = compute_token_overlap(claim, window)
+                if overlap > best_score:
+                    best_score = overlap
+                    best_match = window
+                    
+        return best_match[:200] if best_match else "UNKNOWN"
+
+    def _get_batch_verification_prompt(self, candidates: List[Dict], language: str) -> str:
+        """Create batch verification prompt for model"""
+        chunks = self.processor.arabic_chunks if language == "ar" else self.processor.english_chunks
+        
+        items = []
+        for candidate in candidates:
+            chunk_id = candidate.get("context_chunk_id", 0)
+            chunk_text = chunks[chunk_id].get("text", "")[:4096]  # Limit chunk size
+            
+            items.append({
+                "id": candidate["id"],
+                "claim": candidate["claim"],
+                "chunk_id": chunk_id,
+                "chunk_text": chunk_text
+            })
+            
+        prompt = f"""You are an AAOIFI verifier. DO NOT INVENT REFERENCES and DO NOT use external knowledge beyond the provided chunk_text.
+
+Input JSON:
+{json.dumps({"items": items}, ensure_ascii=False)}
+
+Task: For each item return an object with fields:
+- id
+- verdict: "True" or "False"  
+- explanation: If True: a short verbatim quote (≤120 characters) from chunk_text that supports the claim. If False: a concise reason (≤120 chars).
+- reference: the exact substring from chunk_text that you quoted OR "UNKNOWN"
+- suspected_fabrication: boolean
+- confidence: number 0.0-1.0
+
+Rules:
+1. Use ONLY the provided chunk_text to verify.
+2. If chunk_text includes a verbatim supporting substring then verdict MUST be "True" and reference MUST equal that substring.
+3. Otherwise verdict MUST be "False", reference MUST be "UNKNOWN", and suspected_fabrication true.
+4. Always return EXACTLY one JSON ARRAY with verification objects in same order as input.
+
+Return: EXACTLY a JSON array. No additional text or markdown fences. Temperature=0.0."""
+
         return prompt
 
-    def _get_verification_prompt(self, claim: str, chunk_id: int,
-                                 chunk_text: str) -> str:
-        return f"""You are an AAOIFI verifier. DO NOT INVENT REFERENCES.
-Check the following single claim strictly against the provided chunk text. Return EXACTLY one JSON object including:
-- verdict: "True" or "False"
-- explanation: a short quote from the chunk if True (≤120 chars)
-- reference: the exact substring from the chunk OR "UNKNOWN"
-- suspected_fabrication: boolean
-- confidence: 0-1
-INPUT:
-{json.dumps({"claim": claim, "chunk_id": chunk_id, "chunk_text": chunk_text}, ensure_ascii=False)}
-Rules:
-- If the chunk contains a verbatim match that supports the claim, set verdict:"True" and reference to the exact substring.
-- Else set verdict:"False", reference:"UNKNOWN", suspected_fabrication:true.
-- DO NOT invent numbers, dates, or standard names.
-- Temperature=0.0"""
-
-    def _prepare_batch_seeds(self, language: str,
-                             batch_size: int) -> Tuple[List[Dict], List[Dict]]:
-        seeds_data = self.arabic_seeds if language == "ar" else self.english_seeds
-        chunks_data = self.processor.arabic_chunks if language == "ar" else self.processor.english_chunks
-        selected_seeds = random.sample(seeds_data,
-                                       min(batch_size * 2, len(seeds_data)))
-        batch_seeds, used_chunks = [], set()
-        for seed in selected_seeds:
-            if len(batch_seeds) >= batch_size: break
-            chunk_id = seed.get("chunk_id",
-                                random.randint(0,
-                                               len(chunks_data) - 1))
-            claim = seed.get("answer", seed.get("question", ""))
-            if claim:
-                batch_seeds.append({"claim": claim, "chunk_id": chunk_id})
-                used_chunks.add(chunk_id)
-        relevant_chunks = [{
-            "chunk_id": i,
-            "text": chunks_data[i].get("text", "")[:2000]
-        } for i in used_chunks if i < len(chunks_data)]
-        return batch_seeds[:batch_size], relevant_chunks
-
-    def _verify_candidate(self, candidate: Dict, chunk_text: str) -> Dict:
-        claim = candidate.get("claim", "")
-        chunk_id = candidate.get("context_chunk_id", 0)
-        prompt = self._get_verification_prompt(claim, chunk_id, chunk_text)
-        result = self.gemini_client.call_model("models/gemini-2.5-pro",
-                                               prompt,
-                                               max_tokens=1024)
-        if result["success"]:
-            verification = parse_json_loose(result["raw_text"])
-            if verification and isinstance(verification, dict):
+    def _batch_verify_with_model(self, candidates: List[Dict], language: str, batch_size: int = 8) -> List[Dict]:
+        """Verify candidates using model in batches"""
+        verified = []
+        
+        for i in range(0, len(candidates), batch_size):
+            batch = candidates[i:i + batch_size]
+            prompt = self._get_batch_verification_prompt(batch, language)
+            
+            # Use Gemini Pro for verification
+            result = self.gemini_client.call_model(
+                "models/gemini-2.0-flash-exp",
+                prompt,
+                max_tokens=4096,
+                temperature=0.0
+            )
+            
+            if not result["success"]:
+                self.logger.error(f"Batch verification failed: {result.get('error')}")
+                # Mark all as failed
+                for candidate in batch:
+                    candidate.update({
+                        "verdict": "False",
+                        "reference": "UNKNOWN", 
+                        "explanation": "Verification failed",
+                        "suspected_fabrication": True,
+                        "raw_response_path": "",
+                        "meta": {**candidate["meta"], "confidence": 0.0}
+                    })
+                verified.extend(batch)
+                continue
+                
+            # Parse verification results
+            verifications = parse_json_loose(result["raw_text"])
+            if not verifications or not isinstance(verifications, list):
+                self.logger.error(f"Failed to parse verification results: {result['raw_text'][:200]}")
+                # Mark all as failed
+                for candidate in batch:
+                    candidate.update({
+                        "verdict": "False",
+                        "reference": "UNKNOWN",
+                        "explanation": "Parse failed", 
+                        "suspected_fabrication": True,
+                        "raw_response_path": result.get("raw_response_path", ""),
+                        "meta": {**candidate["meta"], "confidence": 0.0}
+                    })
+                verified.extend(batch)
+                continue
+                
+            # Apply verification results
+            for j, verification in enumerate(verifications):
+                if j >= len(batch):
+                    break
+                    
+                candidate = batch[j]
+                chunks = self.processor.arabic_chunks if language == "ar" else self.processor.english_chunks
+                chunk_text = chunks[candidate["context_chunk_id"]].get("text", "")
+                
+                # Validate reference if verdict is True
+                reference = verification.get("reference", "UNKNOWN")
+                if (verification.get("verdict") == "True" and 
+                    reference != "UNKNOWN" and
+                    reference not in chunk_text):
+                    # Invalid reference, mark as False
+                    verification.update({
+                        "verdict": "False",
+                        "reference": "UNKNOWN",
+                        "suspected_fabrication": True
+                    })
+                    
                 candidate.update({
-                    "verdict":
-                    verification.get("verdict", "False"),
-                    "explanation":
-                    verification.get("explanation", ""),
-                    "reference":
-                    verification.get("reference", "UNKNOWN"),
-                    "suspected_fabrication":
-                    verification.get("suspected_fabrication", True),
+                    "verdict": verification.get("verdict", "False"),
+                    "explanation": verification.get("explanation", "")[:120],
+                    "reference": verification.get("reference", "UNKNOWN"),
+                    "suspected_fabrication": verification.get("suspected_fabrication", True),
+                    "raw_response_path": result.get("raw_response_path", ""),
                     "meta": {
-                        **candidate.get("meta", {}), "confidence":
-                        verification.get("confidence", 0.5),
-                        "verification_model":
-                        "gemini-2.5-pro"
+                        **candidate["meta"], 
+                        "confidence": verification.get("confidence", 0.0)
                     }
                 })
-                reference = candidate.get("reference", "")
-                if reference and reference != "UNKNOWN":
-                    overlap = compute_token_overlap(reference, chunk_text)
-                    if overlap < 0.75:
-                        candidate.update({
-                            "reference": "UNKNOWN",
-                            "suspected_fabrication": True,
-                            "verdict": "False",
-                            "meta": {
-                                **candidate["meta"], "token_overlap": overlap
-                            }
-                        })
-                return candidate
-        candidate.update({
-            "verdict": "False",
-            "reference": "UNKNOWN",
-            "suspected_fabrication": True,
-            "explanation": "Verification failed"
-        })
-        return candidate
+                
+            verified.extend(batch)
+            
+            # Rate limiting
+            time.sleep(1)
+            
+        return verified
 
-    def _process_batch(self, language: str, batch_size: int) -> List[Dict]:
-        seeds, chunks = self._prepare_batch_seeds(language, batch_size)
-        if not seeds or not chunks: return []
-        prompt = self._get_batch_generation_prompt(language, seeds, chunks,
-                                                   batch_size)
-        result = self.gemini_client.call_model("models/gemini-2.5-flash",
-                                               prompt,
-                                               max_tokens=8192)
-        if not result["success"]:
-            self.logger.error(
-                f"Generation failed: {result.get('error', 'API call failed')}")
-            return []
-        candidates = parse_json_loose(result["raw_text"])
-        if not candidates or not isinstance(candidates, list):
-            self.logger.error(
-                f"Failed to parse batch response. Raw text: {result['raw_text'][:200]}"
-            )
-            return []
-        verified_examples, chunk_lookup = [], {
-            c["chunk_id"]: c["text"]
-            for c in chunks
+    def _save_progress(self, language: str, examples: List[Dict], seed_index: int):
+        """Save generation progress"""
+        progress = {
+            "language": language,
+            "total_examples": len(examples),
+            "seed_index": seed_index,
+            "timestamp": time.time(),
+            "stats": self._compute_stats(examples)
         }
-        for candidate in candidates:
-            is_valid, _ = validate_example_schema(candidate,
-                                                  self.required_fields)
-            if not is_valid: continue
-            chunk_id = candidate.get("context_chunk_id", 0)
-            chunk_text = chunk_lookup.get(chunk_id, "")
-            if not chunk_text: continue
-            verified_candidate = self._verify_candidate(candidate, chunk_text)
-            final_valid, _ = validate_example_schema(verified_candidate,
-                                                     self.required_fields)
-            if final_valid:
-                verified_candidate.update({
-                    "id":
-                    str(uuid.uuid4()),
-                    "language":
-                    language,
-                    "generator_model":
-                    result.get("model", "unknown")
-                })
-                verified_examples.append(verified_candidate)
-        return verified_examples
+        
+        with open(f"progress/progress_{language}.json", "w", encoding="utf-8") as f:
+            json.dump(progress, f, ensure_ascii=False, indent=2)
 
-    def _run_generation_loop(self,
-                             language: str,
-                             target: int,
-                             batch_size: int,
-                             is_smoke_test: bool = False):
-        lang_code = self._normalize_language(language)
-        if not lang_code: return []
-        self.logger.info(
-            f"Starting {'smoke test' if is_smoke_test else 'full generation'} for {language}..."
-        )
-        examples, total_attempts, failed_batches = [], 0, 0
-        max_attempts = target * 3 if is_smoke_test else (target //
-                                                         batch_size) * 2 + 10
-        while len(examples) < target and total_attempts < max_attempts:
-            batch_examples = self._process_batch(lang_code, batch_size)
-            total_attempts += 1
-            if batch_examples:
-                examples.extend(batch_examples)
-                failed_batches = 0
-                self.logger.info(
-                    f"Batch {total_attempts}: generated {len(batch_examples)}. Total: {len(examples)}/{target}"
-                )
-                time.sleep(2)
+    def _compute_stats(self, examples: List[Dict]) -> Dict:
+        """Compute dataset statistics"""
+        total = len(examples)
+        true_count = sum(1 for ex in examples if ex.get("verdict") == "True")
+        false_count = sum(1 for ex in examples if ex.get("verdict") == "False")
+        fabrication_count = sum(1 for ex in examples if ex.get("suspected_fabrication") == True)
+        
+        return {
+            "total": total,
+            "true": true_count,
+            "false": false_count,
+            "fabrications": fabrication_count,
+            "fabrication_rate": fabrication_count / total if total > 0 else 0.0
+        }
+
+    def run_smoke_test(self, language: str, target_count: int = 20) -> Dict:
+        """Run smoke test with specified number of examples"""
+        self.logger.info(f"Starting smoke test for {language} with {target_count} examples")
+        
+        # Select seeds for smoke test
+        seeds_data = self.arabic_seeds if language == "ar" else self.english_seeds
+        smoke_seeds = random.sample(seeds_data, min(target_count, len(seeds_data)))
+        
+        # Generate candidates
+        candidates = self._generate_candidates_from_seeds(smoke_seeds, language)
+        self.logger.info(f"Generated {len(candidates)} candidates")
+        
+        # Local pre-verification
+        locally_verified, needs_model = self._local_pre_verification(candidates, language)
+        
+        # Model verification for remaining candidates
+        if needs_model:
+            model_verified = self._batch_verify_with_model(needs_model, language, batch_size=4)
+            all_examples = locally_verified + model_verified
+        else:
+            all_examples = locally_verified
+            
+        # Filter valid examples
+        valid_examples = []
+        for ex in all_examples:
+            is_valid, reason = validate_example_schema(ex, self.required_fields)
+            if is_valid:
+                valid_examples.append(ex)
             else:
-                failed_batches += 1
-                self.logger.warning(
-                    f"Batch {total_attempts} failed (consecutive failures: {failed_batches})"
-                )
-                backoff_time = min(60, 5 * (2**min(failed_batches - 1, 4)))
-                self.logger.info(f"Backing off for {backoff_time}s")
-                time.sleep(backoff_time)
-            if failed_batches >= 8:
-                self.logger.error(
-                    "Too many consecutive failed batches, stopping.")
-                break
-        return examples[:target]
-
-    # --- FIX: Re-created the public run_smoke_test method ---
-    def run_smoke_test(self, language: str, batch_size: int,
-                       smoke_total: int) -> Dict:
-        """Runs a smoke test and returns a results dictionary."""
-        examples = self._run_generation_loop(language,
-                                             smoke_total,
-                                             batch_size,
-                                             is_smoke_test=True)
-        success = len(examples) >= smoke_total * 0.8
+                self.logger.warning(f"Invalid example: {reason}")
+                
+        # Save smoke test results
+        output_file = f"data/generation_stage_B/{language}/smoke_test_{language}_{len(valid_examples)}.jsonl"
+        with open(output_file, "w", encoding="utf-8") as f:
+            for example in valid_examples:
+                f.write(json.dumps(example, ensure_ascii=False) + "\n")
+                
+        stats = self._compute_stats(valid_examples)
+        success = len(valid_examples) >= target_count * 0.8 and stats["fabrication_rate"] <= 0.05
+        
         return {
             "success": success,
-            "total_generated": len(examples),
-            "samples": examples[:3]
+            "stats": stats,
+            "total_generated": len(valid_examples),
+            "output_file": output_file,
+            "samples": valid_examples[:3]
         }
 
-    # --- FIX: Re-created the public generate_full_dataset method ---
-    def generate_full_dataset(self, language: str, target: int,
-                              batch_size: int) -> Dict:
-        """Runs a full dataset generation and returns a results dictionary."""
-        examples = self._run_generation_loop(language, target, batch_size)
-        true_count = sum(
-            1 for ex in examples
-            if isinstance(ex, dict) and ex.get("verdict") == "True")
+    def generate_full_dataset(self, language: str, target: int = 2000, progress_bar=None) -> Dict:
+        """Generate full dataset for specified language"""
+        self.logger.info(f"Starting full generation for {language}, target: {target}")
+        
+        seeds_data = self.arabic_seeds if language == "ar" else self.english_seeds
+        all_examples = []
+        processed_seeds = 0
+        
+        # Process seeds in batches
+        batch_size = 50
+        while len(all_examples) < target and processed_seeds < len(seeds_data):
+            batch_seeds = seeds_data[processed_seeds:processed_seeds + batch_size]
+            
+            # Generate and process batch
+            candidates = self._generate_candidates_from_seeds(batch_seeds, language)
+            locally_verified, needs_model = self._local_pre_verification(candidates, language)
+            
+            if needs_model:
+                model_verified = self._batch_verify_with_model(needs_model, language)
+                batch_examples = locally_verified + model_verified
+            else:
+                batch_examples = locally_verified
+                
+            # Filter valid examples
+            for ex in batch_examples:
+                is_valid, _ = validate_example_schema(ex, self.required_fields)
+                if is_valid and len(all_examples) < target:
+                    all_examples.append(ex)
+                    
+            processed_seeds += batch_size
+            
+            # Save progress every 50 examples
+            if len(all_examples) % 50 == 0:
+                self._save_progress(language, all_examples, processed_seeds)
+                
+            # Update progress bar if provided
+            if progress_bar:
+                progress = len(all_examples) / target
+                progress_bar.progress(min(progress, 1.0))
+                
+            self.logger.info(f"Progress: {len(all_examples)}/{target} examples")
+            
+        # Save final results
+        output_file = f"data/generation_stage_B/{language}/judgmental_{language}_final.jsonl"
+        with open(output_file, "w", encoding="utf-8") as f:
+            for example in all_examples:
+                f.write(json.dumps(example, ensure_ascii=False) + "\n")
+                
+        stats = self._compute_stats(all_examples)
         return {
-            "success": len(examples) == target,
-            "total_generated": len(examples),
-            "true_verdicts": true_count,
-            "samples": examples[:3]
+            "success": len(all_examples) >= target * 0.9,
+            "stats": stats,
+            "total_generated": len(all_examples),
+            "output_file": output_file
         }
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Generate AAOIFI judgmental dataset")
-    parser.add_argument("--lang",
-                        choices=["ar", "en"],
-                        required=True,
-                        help="Language")
-    parser.add_argument("--mode",
-                        choices=["smoke", "full"],
-                        required=True,
-                        help="Generation mode")
-    parser.add_argument("--batch_size",
-                        type=int,
-                        default=2,
-                        help="Batch size for generation")
-    parser.add_argument("--smoke_total",
-                        type=int,
-                        default=10,
-                        help="Smoke test target")
-    parser.add_argument("--target",
-                        type=int,
-                        default=2000,
-                        help="Full generation target")
+    parser = argparse.ArgumentParser(description="Generate AAOIFI judgmental dataset")
+    parser.add_argument("--smoke", action="store_true", help="Run smoke test")
+    parser.add_argument("--full", action="store_true", help="Run full generation")
+    parser.add_argument("--lang", choices=["ar", "en"], required=True, help="Language")
+    parser.add_argument("--target", type=int, default=2000, help="Target examples for full generation")
+    parser.add_argument("--smoke-count", type=int, default=20, help="Examples for smoke test")
+    
     args = parser.parse_args()
-
+    
     try:
         generator = DatasetGenerator()
-        results = {}
-
-        # --- FIX: Main function now correctly calls the restored methods ---
-        if args.mode == "smoke":
-            results = generator.run_smoke_test(args.lang, args.batch_size,
-                                               args.smoke_total)
+        
+        if args.smoke:
+            results = generator.run_smoke_test(args.lang, args.smoke_count)
+            print(json.dumps(results, indent=2, ensure_ascii=False))
+        elif args.full:
+            results = generator.generate_full_dataset(args.lang, args.target)
+            print(json.dumps(results, indent=2, ensure_ascii=False))
         else:
-            results = generator.generate_full_dataset(args.lang, args.target,
-                                                      args.batch_size)
-
-        print(json.dumps(results, indent=2, ensure_ascii=False))
-
+            print("Specify --smoke or --full")
+            
     except Exception as e:
-        logging.error(f"An unexpected error occurred in main: {e}",
-                      exc_info=True)
-        print(json.dumps({"success": False, "error": str(e)}, indent=2))
+        logging.error(f"Generation failed: {e}", exc_info=True)
         sys.exit(1)
 
 

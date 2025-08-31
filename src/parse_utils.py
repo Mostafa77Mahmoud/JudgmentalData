@@ -1,129 +1,149 @@
 
 import json
 import re
-from typing import Optional, Any, Set
-
-def clean_model_output(text: str) -> str:
-    """Strip markdown fences and clean response text"""
-    if not text:
-        return ""
-    
-    # Remove markdown code blocks
-    text = re.sub(r'```json\s*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'```\s*', '', text)
-    
-    # Remove common prefixes
-    text = re.sub(r'^[^{\[]*', '', text)
-    
-    # Remove trailing non-JSON characters
-    text = re.sub(r'[^}\]]*$', '', text)
-    
-    return text.strip()
+import logging
+from typing import Any, Dict, List, Optional, Tuple
 
 def parse_json_loose(text: str) -> Optional[Any]:
-    """Attempt to parse JSON with error recovery"""
-    if not text:
+    """Robust JSON parsing with fallback strategies"""
+    logger = logging.getLogger(__name__)
+    
+    if not text or not text.strip():
         return None
+        
+    # Remove common markdown artifacts
+    text = text.strip()
+    text = re.sub(r'^```json\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^```\s*', '', text, flags=re.MULTILINE) 
+    text = re.sub(r'\s*```$', '', text, flags=re.MULTILINE)
     
-    # Clean first
-    cleaned = clean_model_output(text)
-    
-    # Try direct parse
+    # Try direct parsing first
     try:
-        return json.loads(cleaned)
+        return json.loads(text)
     except json.JSONDecodeError:
         pass
-    
-    # Extract JSON array or object with regex
-    patterns = [
-        r'(\[.*\])',  # Array
-        r'(\{.*\})'   # Object
+        
+    # Try to find JSON object or array
+    json_patterns = [
+        r'\{.*\}',  # JSON object
+        r'\[.*\]'   # JSON array
     ]
     
-    for pattern in patterns:
-        match = re.search(pattern, cleaned, re.DOTALL)
-        if match:
-            json_str = match.group(1)
-            
-            # Try to fix common issues
-            json_str = _fix_json_issues(json_str)
-            
+    for pattern in json_patterns:
+        matches = re.findall(pattern, text, re.DOTALL)
+        for match in matches:
             try:
-                return json.loads(json_str)
+                return json.loads(match)
             except json.JSONDecodeError:
                 continue
-    
+                
+    # Try to extract balanced braces/brackets
+    for start_char, end_char in [("{", "}"), ("[", "]")]:
+        start_idx = text.find(start_char)
+        if start_idx == -1:
+            continue
+            
+        depth = 0
+        for i, char in enumerate(text[start_idx:], start_idx):
+            if char == start_char:
+                depth += 1
+            elif char == end_char:
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start_idx:i+1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        break
+                        
+    logger.warning(f"Failed to parse JSON from text: {text[:200]}...")
     return None
 
-def _fix_json_issues(json_str: str) -> str:
-    """Fix common JSON formatting issues"""
-    # Remove trailing commas
-    json_str = re.sub(r',\s*}', '}', json_str)
-    json_str = re.sub(r',\s*]', ']', json_str)
-    
-    # Fix unbalanced braces by removing characters from end
-    brace_count = 0
-    bracket_count = 0
-    last_valid_pos = len(json_str)
-    
-    for i, char in enumerate(json_str):
-        if char == '{':
-            brace_count += 1
-        elif char == '}':
-            brace_count -= 1
-        elif char == '[':
-            bracket_count += 1
-        elif char == ']':
-            bracket_count -= 1
+def compute_token_overlap(ref_text: str, chunk_text: str) -> float:
+    """Compute token overlap between reference and chunk text"""
+    if not ref_text or not chunk_text:
+        return 0.0
         
-        # If we have balanced braces/brackets, mark this position
-        if brace_count >= 0 and bracket_count >= 0:
-            if (json_str[0] == '{' and brace_count == 0) or (json_str[0] == '[' and bracket_count == 0):
-                last_valid_pos = i + 1
-                break
+    # Normalize text for comparison
+    ref_tokens = set(normalize_text_for_overlap(ref_text).split())
+    chunk_tokens = set(normalize_text_for_overlap(chunk_text).split())
     
-    return json_str[:last_valid_pos]
-
-def compute_token_overlap(a: str, b: str) -> float:
-    """Compute token overlap between two strings"""
-    if not a or not b:
+    if not ref_tokens:
         return 0.0
+        
+    intersection = ref_tokens.intersection(chunk_tokens)
+    return len(intersection) / len(ref_tokens)
+
+def normalize_text_for_overlap(text: str) -> str:
+    """Normalize text for token overlap computation"""
+    import unicodedata
     
-    # Normalize text
-    def normalize(text: str) -> Set[str]:
-        # Convert to lowercase
+    # Unicode normalization
+    text = unicodedata.normalize('NFKD', text)
+    
+    # Remove diacritics (Arabic tashkeel)
+    text = re.sub(r'[\u064B-\u065F\u0670\u06D6-\u06ED]', '', text)
+    
+    # Normalize punctuation and whitespace
+    text = re.sub(r'[^\w\s]', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Lowercase for English, preserve Arabic casing
+    if re.search(r'[a-zA-Z]', text):
         text = text.lower()
-        # Remove punctuation and normalize whitespace
-        text = re.sub(r'[^\w\s]', ' ', text)
-        text = re.sub(r'\s+', ' ', text).strip()
-        return set(text.split())
-    
-    tokens_a = normalize(a)
-    tokens_b = normalize(b)
-    
-    if not tokens_a:
-        return 0.0
-    
-    intersection = tokens_a & tokens_b
-    return len(intersection) / len(tokens_a)
+        
+    return text.strip()
 
-def validate_example_schema(example: dict, required_fields: list) -> tuple[bool, list]:
+def validate_example_schema(example: Dict, required_fields: List[str]) -> Tuple[bool, str]:
     """Validate example against required schema"""
-    errors = []
-    
+    if not isinstance(example, dict):
+        return False, "Example is not a dictionary"
+        
     # Check required fields
     for field in required_fields:
         if field not in example:
-            errors.append(f"Missing field: {field}")
+            return False, f"Missing required field: {field}"
+            
+    # Validate specific constraints
+    if example.get("verdict") not in ["True", "False"]:
+        return False, "verdict must be 'True' or 'False'"
+        
+    if example.get("verdict") == "True":
+        if not example.get("reference") or example.get("reference") == "UNKNOWN":
+            return False, "True verdict requires valid reference"
+        if not example.get("explanation"):
+            return False, "True verdict requires explanation"
+            
+    if not isinstance(example.get("suspected_fabrication"), bool):
+        return False, "suspected_fabrication must be boolean"
+        
+    context_excerpt = example.get("context_excerpt", "")
+    if len(context_excerpt) > 512:
+        return False, "context_excerpt exceeds 512 characters"
+        
+    return True, "Valid"
+
+def find_exact_substring(reference: str, chunk_text: str) -> Optional[str]:
+    """Find exact substring match in chunk text"""
+    if not reference or not chunk_text or reference == "UNKNOWN":
+        return None
+        
+    # Try exact match first
+    if reference in chunk_text:
+        return reference
+        
+    # Try normalized match
+    norm_ref = normalize_text_for_overlap(reference)
+    norm_chunk = normalize_text_for_overlap(chunk_text)
     
-    # Validate specific field types and values
-    if "verdict" in example and example["verdict"] not in ["True", "False"]:
-        errors.append("Invalid verdict value (must be 'True' or 'False')")
-    
-    if "language" in example and example["language"] not in ["ar", "en"]:
-        errors.append("Invalid language value")
-    
-    if "suspected_fabrication" in example and not isinstance(example["suspected_fabrication"], bool):
-        errors.append("suspected_fabrication must be boolean")
-    
-    return len(errors) == 0, errors
+    if norm_ref in norm_chunk:
+        # Find the actual substring in original text
+        ref_words = norm_ref.split()
+        chunk_words = chunk_text.split()
+        
+        for i in range(len(chunk_words) - len(ref_words) + 1):
+            candidate = ' '.join(chunk_words[i:i+len(ref_words)])
+            if normalize_text_for_overlap(candidate) == norm_ref:
+                return candidate
+                
+    return None
