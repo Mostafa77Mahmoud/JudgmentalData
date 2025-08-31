@@ -9,7 +9,7 @@ packages = ["glibcLocales"]
 run = ["sh", "-c", "python app.py"]
 
 [workflows]
-runButton = "Run Pipeline"
+runButton = "Streamlit App"
 
 [[workflows.workflow]]
 name = "Run Pipeline"
@@ -28,3 +28,12 @@ author = 47083209
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python app.py"
+
+[[workflows.workflow]]
+name = "Streamlit App"
+author = 47083209
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "streamlit run app.py --server.address=0.0.0.0 --server.port=5000"
