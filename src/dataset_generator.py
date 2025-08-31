@@ -97,7 +97,7 @@ class DatasetGenerator:
             self.logger.error(f"Failed to load seeds: {e}")
             raise
 
-    def _build_generation_prompt(self, context_chunks: List[Dict], language: str, target_count: int = 20) -> str:
+    def _build_generation_prompt(self, context_chunks: List[Dict], language: str, target_count: int = 8) -> str:
         """Build prompt for generating judgmental examples using context chunks"""
         
         # Prepare context text from chunks
@@ -189,7 +189,7 @@ Return ONLY valid JSON without any additional text:
                 result = self.gemini_client.call_model(
                     prompt=prompt,
                     model="gemini-2.5-flash",
-                    max_tokens=8000,
+                    max_tokens=6000,
                     temperature=0.3
                 )
                 
@@ -433,9 +433,9 @@ Return ONLY valid JSON without any additional text:
         all_examples = []
         processed_chunks = 0
 
-        # Process chunks in batches
-        chunk_batch_size = 10
-        examples_per_batch = 25
+        # Process chunks in batches (smaller to prevent truncation)
+        chunk_batch_size = 5
+        examples_per_batch = 8
 
         while len(all_examples) < target and processed_chunks < len(chunks):
             # Select chunk batch

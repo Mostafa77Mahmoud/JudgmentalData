@@ -20,7 +20,7 @@ except ImportError:
     except ImportError:
         raise ImportError("Neither google-genai nor google-generativeai is available")
 
-from src.gemini_config import API_KEYS, MODELS, BATCH_SIZE, MAX_RETRIES, CONTEXT_MAX_CHARS, VERIFIER_MODEL, VERIFIER_TEMPERATURE, MAX_OUTPUT_TOKENS, MAX_INPUT_TOKENS
+from src.gemini_config import API_KEYS, MODELS, BATCH_SIZE, MAX_RETRIES, CONTEXT_MAX_CHARS, VERIFIER_MODEL, VERIFIER_TEMPERATURE, MAX_OUTPUT_TOKENS, MAX_INPUT_TOKENS, VERIFICATION_OUTPUT_TOKENS
 
 # Add missing constants
 INITIAL_BACKOFF = 1.0
@@ -206,7 +206,7 @@ def send_verify_request(model_name: str, api_key: str, items: List[Dict], lang: 
                 contents=prompt_text,
                 config=types.GenerateContentConfig(
                     temperature=0.0,
-                    max_output_tokens=1200,
+                    max_output_tokens=VERIFICATION_OUTPUT_TOKENS,
                     response_mime_type="application/json",
                     response_schema=_verify_schema()
                 )
@@ -220,7 +220,7 @@ def send_verify_request(model_name: str, api_key: str, items: List[Dict], lang: 
                 prompt_text,
                 generation_config=genai.GenerationConfig(
                     temperature=0.0,
-                    max_output_tokens=1200,
+                    max_output_tokens=VERIFICATION_OUTPUT_TOKENS,
                     response_mime_type="application/json"
                 )
             )
@@ -610,7 +610,7 @@ class GeminiClient:
             try:
                 if USE_NEW_SDK:
                     client = genai.Client(api_key=key)
-                    
+
                     # Check input token estimate
                     estimated_input_tokens = len(prompt) // 3  # Rough estimate
                     if estimated_input_tokens > MAX_INPUT_TOKENS:
@@ -631,7 +631,7 @@ class GeminiClient:
                     # Fallback to old SDK
                     genai.configure(api_key=key)
                     model_instance = genai.GenerativeModel(model)
-                    
+
                     start_time = time.time()
                     response = model_instance.generate_content(
                         prompt,
@@ -660,7 +660,7 @@ class GeminiClient:
                         if candidate.content.parts:
                             text_parts = [part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text]
                             text_content = "\n".join(text_parts)
-                
+
                 # Fallback to response.text if available
                 if not text_content and hasattr(response, 'text'):
                     text_content = response.text
