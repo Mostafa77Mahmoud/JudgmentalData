@@ -8,7 +8,7 @@ import re
 from typing import List, Dict, Optional, Tuple, Any, Union
 from pathlib import Path
 import google.generativeai as genai
-from src.gemini_config import API_KEYS, MODELS, BATCH_SIZE, MAX_RETRIES, CONTEXT_MAX_CHARS, VERIFIER_MODEL, VERIFIER_TEMPERATURE, MAX_OUTPUT_TOKENS
+from src.gemini_config import API_KEYS, MODELS, BATCH_SIZE, MAX_RETRIES, CONTEXT_MAX_CHARS, VERIFIER_MODEL, VERIFIER_TEMPERATURE, MAX_OUTPUT_TOKENS, MAX_INPUT_TOKENS
 
 # Add missing constants
 INITIAL_BACKOFF = 1.0
@@ -381,6 +381,11 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
     # Use smaller max tokens to avoid truncation
     max_tokens = min(MAX_OUTPUT_TOKENS,
                      est_tokens_per_item * max(1, len(items)))
+    
+    # Ensure we don't exceed input token limits
+    estimated_input_tokens = len(json.dumps(items, ensure_ascii=False)) // 3  # Rough estimate
+    if estimated_input_tokens > MAX_INPUT_TOKENS:
+        logger.warning(f"Input tokens ({estimated_input_tokens}) may exceed limit ({MAX_INPUT_TOKENS})")
 
     last_err = None
     last_raw_path = None
@@ -521,7 +526,7 @@ class GeminiClient:
     def call_model(self,
                    prompt: str,
                    model: str = "gemini-2.5-flash",
-                   max_tokens: int = 60000,
+                   max_tokens: int = 40000,
                    temperature: float = 0.0,
                    max_attempts: int = 3) -> Dict:
         """Call Gemini model using Google Generative AI SDK"""
