@@ -183,8 +183,10 @@ def dataset_generation_page():
         if st.button("🧪 Run Smoke Test"):
             with st.spinner("Running smoke test..."):
                 try:
+                    # Convert language name to language code
+                    lang_code = "ar" if smoke_language == "Arabic" else "en"
                     results = st.session_state.generator.run_smoke_test(
-                        language=smoke_language.lower(),
+                        language=lang_code,
                         target_count=smoke_target
                     )
 
@@ -211,8 +213,11 @@ def dataset_generation_page():
         target_count = st.number_input("Target examples per language", min_value=100, max_value=5000, value=2000)
 
         if st.button("Generate Full Dataset"):
-            # Check if the smoke test generated a preview file for Arabic
-            if not Path(f"data/generation_stage_B/{'ar' if smoke_language == 'Arabic' else 'en'}/preview_{'ar' if smoke_language == 'Arabic' else 'en'}_20.jsonl").exists():
+            # Check if smoke test output exists
+            ar_files = list(Path("data/generation_stage_B/ar").glob("smoke_test_ar_*.jsonl"))
+            en_files = list(Path("data/generation_stage_B/en").glob("smoke_test_en_*.jsonl"))
+            
+            if not ar_files and not en_files:
                 st.warning("Please run and pass the smoke test first.")
                 return
 
