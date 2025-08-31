@@ -48,7 +48,7 @@ def save_raw_body(body: Dict, filename_prefix: str) -> str:
         f.write(json.dumps(body, ensure_ascii=False) + "\n")
     return filepath
 
-def save_raw_response(response_text: str, model: str, attempt: int) -> str:
+def save_raw_response(response_text: str, model: str, attempt: int = 0) -> str:
     """Save raw response for debugging"""
     os.makedirs("raw", exist_ok=True)
     timestamp = int(time.time())
@@ -157,12 +157,12 @@ def extract_text_from_response(resp):
 def rotate_key(attempt_index: int) -> str:
     return API_KEYS[attempt_index % len(API_KEYS)]
 
-def exponential_backoff_sleep(attempt: int):
-    base = INITIAL_BACKOFF * (2 ** (attempt - 1))
-    jitter = random.uniform(0, base * 0.1)
-    sleep_for = min(base + jitter, MAX_BACKOFF)
-    logger.info("backoff sleep: %.2fs (attempt %d)", sleep_for, attempt)
-    time.sleep(sleep_for)
+def backoff_with_jitter(attempt: int):
+    """Helper function for exponential backoff with jitter."""
+    BACKOFF_BASES = [1, 2, 4, 8, 16]  # Example bases
+    base = BACKOFF_BASES[min(attempt - 1, len(BACKOFF_BASES) - 1)]
+    jitter = base * 0.2 * (random.random() * 2 - 1)  # Jitter between -10% and +10% of base
+    return max(0.1, base + jitter) # Ensure minimum backoff of 0.1 seconds
 
 def send_verify_request(model_name: str, api_key: str, prompt_text: str, max_tokens: int, attempt: int) -> str:
     """
@@ -404,7 +404,9 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
                 )
 
             if attempt < MAX_RETRIES:
-                exponential_backoff_sleep(attempt)
+                wait_time = backoff_with_jitter(attempt)
+                logger.info(f"Backing off for {wait_time:.2f}s (attempt {attempt})")
+                time.sleep(wait_time)
                 continue
             else:
                 break
@@ -413,7 +415,9 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
             last_err = e
             logger.error("Unexpected error with key index %d, attempt %d: %s", key_index, attempt, str(e))
             if attempt < MAX_RETRIES:
-                exponential_backoff_sleep(attempt)
+                wait_time = backoff_with_jitter(attempt)
+                logger.info(f"Backing off for {wait_time:.2f}s (attempt {attempt})")
+                time.sleep(wait_time)
                 continue
             else:
                 break
@@ -553,7 +557,7 @@ class GeminiClient:
 
                 # Make the API call
                 start_time = time.time()
-                response = model_obj.generate_content(prompt)
+                response = model_instance.generate_content(prompt)
                 latency = time.time() - start_time
 
                 # Update key state
@@ -600,7 +604,8 @@ class GeminiClient:
                     pass
 
                 if attempt < max_attempts - 1:
-                    wait_time = 2 ** attempt  # Exponential backoff
+                    wait_time = backoff_with_jitter(attempt)
+                    logger.info(f"Backing off for {wait_time:.2f}s (attempt {attempt})")
                     time.sleep(wait_time)
                     continue
                 else:

@@ -1,8 +1,8 @@
 
 {
-  "DEFAULT_MODELS": ["models/gemini-2.5-pro","models/gemini-2.5-flash","models/gemini-2.5-flash-lite"],
+  "DEFAULT_MODELS": ["models/gemini-2.5-flash-lite"],
   "SINGLE_MODEL_FALLBACK": "models/gemini-2.5-flash-lite",
-  "BATCH_VERIFY_SIZE": 4,
+  "BATCH_VERIFY_SIZE": 1,
   "MAX_EXCERPT_CHARS": 512,
   "MAX_SMOKE_EXAMPLES": 20,
   "MAX_API_ATTEMPTS": 5,
