@@ -1,16 +1,14 @@
-# src/gemini_client.py
+
 import time
 import random
 import json
 import logging
 import os
-import re
 import threading
 from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
-import google.generativeai as genai
-from google.api_core import exceptions as google_exceptions
-from google.protobuf.json_format import MessageToDict
+from google import genai
+from google.genai import types
 from src.gemini_config import API_KEYS, MODELS, BATCH_SIZE, MAX_RETRIES, CONTEXT_MAX_CHARS, VERIFIER_MODEL, VERIFIER_TEMPERATURE, MAX_OUTPUT_TOKENS
 
 # Add missing constants
@@ -25,146 +23,89 @@ class NoTextPartsError(Exception):
     """Raised when no textual parts found in API response"""
     pass
 
-def save_raw_body(body: Dict, filename_prefix: str) -> str:
-    """Saves a dictionary to a JSON file with a timestamped filename."""
-    os.makedirs("logs/raw_bodies", exist_ok=True)
-    timestamp = int(time.time())
-    filepath = f"logs/raw_bodies/{filename_prefix}_{timestamp}.jsonl"
-    with open(filepath, "w", encoding="utf8") as f:
-        f.write(json.dumps(body, ensure_ascii=False) + "\n")
-    return filepath
-
-def save_raw_response(resp_obj, model_name="unknown_model", attempt: int = 0) -> str:
-    """Save raw API response (best-effort). Returns saved path."""
+def save_raw_response(response_obj, model_name="unknown_model", attempt: int = 0) -> str:
+    """Save raw API response with better serialization"""
     os.makedirs("raw", exist_ok=True)
     ts = int(time.time() * 1000)
-    safe_name = model_name.replace("/", "_")
+    safe_name = model_name.replace("/", "_").replace("models_", "")
     path = f"raw/{ts}_{safe_name}_att{attempt}.resp.json"
+    
     try:
         with open(path, "w", encoding="utf8") as f:
-            # Handle protobuf responses safely
-            if hasattr(resp_obj, "_pb"):
-                safe_response = MessageToDict(resp_obj._pb)
-            elif hasattr(resp_obj, "_raw_response"):
-                safe_response = MessageToDict(resp_obj._raw_response)
+            # Handle the new google-genai response format
+            if hasattr(response_obj, 'text'):
+                response_data = {
+                    "text": response_obj.text,
+                    "candidates": [
+                        {
+                            "content": {"parts": [{"text": part.text}] for part in candidate.content.parts if hasattr(part, 'text')},
+                            "finish_reason": candidate.finish_reason.name if hasattr(candidate, 'finish_reason') else "UNKNOWN"
+                        } for candidate in response_obj.candidates
+                    ],
+                    "usage_metadata": {
+                        "prompt_token_count": response_obj.usage_metadata.prompt_token_count if hasattr(response_obj, 'usage_metadata') else 0,
+                        "candidates_token_count": response_obj.usage_metadata.candidates_token_count if hasattr(response_obj, 'usage_metadata') else 0,
+                        "total_token_count": response_obj.usage_metadata.total_token_count if hasattr(response_obj, 'usage_metadata') else 0
+                    }
+                }
             else:
-                safe_response = str(resp_obj)
+                response_data = {"error": "No text attribute", "raw": str(response_obj)}
             
-            json.dump(safe_response, f, ensure_ascii=False, indent=2)
+            json.dump(response_data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         # Fallback to plain text if JSON fails
         try:
             with open(path.replace(".json", ".txt"), "w", encoding="utf8") as f:
-                f.write(str(resp_obj))
+                f.write(str(response_obj))
             path = path.replace(".json", ".txt")
         except Exception:
-            pass
+            logger.error(f"Failed to save raw response: {e}")
     return path
 
-
-def extract_text_from_response(resp) -> str:
-    """
-    resp: requests.Response or a parsed dict
-    returns: text string or raises ValueError with saved path info
-    """
-    if hasattr(resp, "text"):
-        raw_text = resp.text
-        try:
-            body = resp.json()
-        except Exception:
-            body = None
-    else:
-        body = resp
-        raw_text = json.dumps(body, ensure_ascii=False)
-    saved_path = save_raw_response(raw_text, "verify")
-
-    # Try known shapes
-    def try_from_candidate_list(lst):
-        if not isinstance(lst, list): return None
-        first = lst[0] if lst else None
-        if not first: return None
-        # candidate may have nested output -> parts
-        for field in ("output", "response", "content", "message"):
-            cand_part = first.get(field) if isinstance(first, dict) else None
-            if isinstance(cand_part, dict) and "parts" in cand_part:
-                parts = cand_part["parts"]
-                if isinstance(parts, list):
-                    return "".join(p.get("text","") for p in parts if isinstance(p, dict))
-            if isinstance(cand_part, list):
-                # try list of parts
-                text_acc = []
-                for item in cand_part:
-                    if isinstance(item, dict) and "text" in item:
-                        text_acc.append(item["text"])
-                if text_acc:
-                    return "".join(text_acc)
-            if isinstance(cand_part, str):
-                return cand_part
-        # fallback: check first-level keys
-        for k in ("text","content","message"):
-            if isinstance(first.get(k), str):
-                return first.get(k)
-        return None
-
-    # body-level tries
-    if isinstance(body, dict):
-        for key in ("candidates","outputs","output","choices","responses"):
-            val = body.get(key)
-            if val:
-                t = try_from_candidate_list(val) if isinstance(val, list) else (val.get("text") if isinstance(val, dict) else None)
-                if t:
-                    return t
-        # try top-level simple text field
-        for k in ("text","output_text","response_text"):
-            if isinstance(body.get(k), str):
-                return body.get(k)
-
-    # if no text found:
-    raise NoTextPartsError(f"No textual parts found in API response. Raw saved to {saved_path}")
-
 def rotate_key(attempt_index: int) -> str:
+    """Rotate API keys"""
     return API_KEYS[attempt_index % len(API_KEYS)]
 
-def backoff_with_jitter(attempt: int):
-    """Helper function for exponential backoff with jitter."""
-    BACKOFF_BASES = [1, 2, 4, 8, 16]  # Example bases
-    base = BACKOFF_BASES[min(attempt - 1, len(BACKOFF_BASES) - 1)]
-    jitter = base * 0.2 * (random.random() * 2 - 1)  # Jitter between -10% and +10% of base
-    return max(0.1, base + jitter) # Ensure minimum backoff of 0.1 seconds
+def backoff_with_jitter(attempt: int) -> float:
+    """Exponential backoff with jitter"""
+    base = min(2 ** attempt, MAX_BACKOFF)
+    jitter = base * 0.2 * (random.random() * 2 - 1)
+    return max(0.1, base + jitter)
 
 def send_verify_request(model_name: str, api_key: str, prompt_text: str, max_tokens: int, attempt: int) -> str:
-    """
-    Send verification request using Google Generative AI SDK with robust parsing
-    """
-    genai.configure(api_key=api_key)
-
-    generation_config = genai.GenerationConfig(
-        temperature=VERIFIER_TEMPERATURE,
-        max_output_tokens=max_tokens,
-    )
-
-    model_instance = genai.GenerativeModel(
-        model_name=model_name,
-        generation_config=generation_config
-    )
-
+    """Send verification request using new Google GenAI SDK"""
     try:
-        response = model_instance.generate_content(prompt_text)
+        client = genai.Client(api_key=api_key)
+        
+        config = types.GenerateContentConfig(
+            temperature=VERIFIER_TEMPERATURE,
+            max_output_tokens=max_tokens,
+            response_mime_type="application/json"
+        )
 
-        # Save raw response for debugging using safe serialization
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt_text,
+            config=config
+        )
+
+        # Save raw response for debugging
         raw_path = save_raw_response(response, f"verify_{model_name}", attempt)
 
-        # Try to extract text using robust parsing
-        try:
-            body_dict = safe_serialize_response(response)
-            text_result = extract_text_from_parsed(body_dict)
-            if text_result is None:
-                raise NoTextPartsError(f"No text parts found in response. Raw saved to {raw_path}")
-            return text_result
-        except (NoTextPartsError, ValueError) as e:
-            # Log the specific error and re-raise
-            logger.error(f"Failed to extract text from response: {e}")
-            raise
+        # Check if response has text
+        if not hasattr(response, 'text') or not response.text:
+            # Check finish reason
+            if response.candidates and len(response.candidates) > 0:
+                candidate = response.candidates[0]
+                if hasattr(candidate, 'finish_reason'):
+                    if candidate.finish_reason.name == "MAX_TOKENS":
+                        raise ValueError(f"Response truncated due to MAX_TOKENS. Increase max_output_tokens. Raw saved to {raw_path}")
+                    elif candidate.finish_reason.name in ["SAFETY", "OTHER"]:
+                        raise ValueError(f"Response blocked due to {candidate.finish_reason.name}. Raw saved to {raw_path}")
+            
+            raise NoTextPartsError(f"No text parts found in response. Raw saved to {raw_path}")
+        
+        return response.text
 
     except Exception as e:
         # Save error details
@@ -178,11 +119,11 @@ def send_verify_request(model_name: str, api_key: str, prompt_text: str, max_tok
         logger.error(f"API call failed, error saved to {error_path}")
         raise
 
-def find_json_bounds(text: str):
-    """Find first balanced JSON array or object in text and return substring, or None."""
+def find_json_bounds(text: str) -> Optional[str]:
+    """Find first balanced JSON array or object in text"""
     if not text:
         return None
-    # search for opening bracket
+    
     starts = [(m.start(), m.group()) for m in re.finditer(r'[\[\{]', text)]
     for start_index, start_char in starts:
         stack = []
@@ -192,72 +133,48 @@ def find_json_bounds(text: str):
             elif ch in (']', '}'):
                 if not stack:
                     break
-                opening = stack.pop()
-                # allow mismatch but continue
+                stack.pop()
             if not stack:
                 return text[start_index:i+1]
     return None
 
-def robust_parse_json_array(text: str):
-    """Try several heuristics to parse model response into a JSON list of objects."""
-    if not text:
-        return None
-
-    # Basic validation - reject if too short or contains error markers
-    if len(text.strip()) < 50:
+def robust_parse_json_array(text: str) -> Optional[List[Dict]]:
+    """Parse model response into JSON list with robust error handling"""
+    if not text or len(text.strip()) < 10:
         logger.warning(f"Response too short ({len(text)} chars): {text[:100]}")
         return None
 
-    if any(marker in text.lower() for marker in ["error", "traceback", "exception"]):
-        logger.warning(f"Response contains error markers: {text[:200]}")
-        return None
-
-    # remove code fences and common wrapper text
-    text = re.sub(r"^```(?:json)?\n", "", text.strip())
-    text = re.sub(r"\n```$", "", text)
+    # Remove common wrapper text and markdown
+    text = text.strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    if text.endswith("```"):
+        text = text[:-3]
     text = text.strip()
 
-    # direct parse
+    # Direct parse attempt
     try:
-        j = json.loads(text)
-        if isinstance(j, list):
-            return j
-        if isinstance(j, dict):
-            return [j]
-    except Exception:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return parsed
+        elif isinstance(parsed, dict):
+            return [parsed]
+    except json.JSONDecodeError:
         pass
 
-    # find first balanced structure
+    # Find balanced JSON structure
     candidate = find_json_bounds(text)
     if candidate:
         try:
-            j = json.loads(candidate)
-            if isinstance(j, list):
-                return j
-            if isinstance(j, dict):
-                return [j]
-        except Exception:
-            # try simple repair: if opened '[' but missing ']', add closing brackets
-            if candidate.count('[') > candidate.count(']'):
-                repaired = candidate + (']' * (candidate.count('[') - candidate.count(']')))
-                try:
-                    j = json.loads(repaired)
-                    if isinstance(j, list):
-                        return j
-                    if isinstance(j, dict):
-                        return [j]
-                except Exception:
-                    pass
-    # fallback: regex-extract top-level objects
-    objs = re.findall(r'\{(?:[^{}]|\{[^}]*\})*\}', text, flags=re.DOTALL)
-    parsed = []
-    for o in objs:
-        try:
-            parsed.append(json.loads(o))
-        except Exception:
-            continue
-    if parsed:
-        return parsed
+            parsed = json.loads(candidate)
+            if isinstance(parsed, list):
+                return parsed
+            elif isinstance(parsed, dict):
+                return [parsed]
+        except json.JSONDecodeError:
+            pass
+
+    logger.error(f"Failed to parse JSON from response: {text[:200]}")
     return None
 
 def create_manual_review_item(candidate_id: str, claim: str, chunk_excerpt: str, raw_path: str, model: str, key_index: int, error: str):
@@ -265,7 +182,7 @@ def create_manual_review_item(candidate_id: str, claim: str, chunk_excerpt: str,
     review_item = {
         "candidate_id": candidate_id,
         "claim": claim,
-        "chunk_excerpt": chunk_excerpt[:500],  # Truncate for readability
+        "chunk_excerpt": chunk_excerpt[:500],
         "raw_response_path": raw_path,
         "model_used": model,
         "key_index": key_index,
@@ -280,49 +197,40 @@ def create_manual_review_item(candidate_id: str, claim: str, chunk_excerpt: str,
     logger.info(f"Created manual review item: {review_file}")
     return review_file
 
-# The strict verifier prompt to include in requests (kept as constant)
-VERIFIER_PROMPT = r"""
-System: You are a strict JSON-only verifier. You MUST respond with exactly one JSON array containing one object per input item and NOTHING else (no prose, no backticks, no commentary).
+# Strict verifier prompt
+VERIFIER_PROMPT = '''
+You are a strict JSON-only verifier. Respond with EXACTLY one JSON array containing verification objects and NOTHING else.
 
-Input: an array `items` where each item has:
-- id: string
-- claim: string
-- context_excerpt: string (already truncated to <=512 chars)
-- language: "ar" or "en"
-- context_chunk_id: integer
+For each input item, determine if the claim can be VERIFIED from the context excerpt:
 
-Task: For each item decide whether the claim can be VERIFIED from the context excerpt.
+1. If claim has exact/near-exact substring match in context: verdict="True", reference=exact matched text, explanation=brief quote justification, suspected_fabrication=false, confidence=0.90-1.00
+2. If context lacks evidence: verdict="False", reference="UNKNOWN", explanation=brief reason, suspected_fabrication=true, confidence=0.1-0.5
+
 Rules:
-1. If an exact substring of the claim (or a near-literal short quote) exists inside context_excerpt, set verdict to "True", reference to that exact matched substring, explanation to a one-sentence quote-based justification (<=30 words), suspected_fabrication false, confidence 0.90-1.00.
-2. If the context does NOT contain evidence to support the claim, set verdict to "False", reference: "UNKNOWN", explanation: short (<=20 words), suspected_fabrication true or false as appropriate, confidence 0.1-0.5.
-3. Never invent references. If unsure, choose "False" with reference "UNKNOWN".
-4. Use verdict values exactly "True" or "False".
-5. The output JSON array length must match input length and preserve input order. Each object MUST include fields:
-   { "id", "language", "claim", "context_chunk_id", "context_excerpt", "verdict", "explanation", "reference", "suspected_fabrication", "generator_model", "raw_response_path", "meta" }
-6. meta must contain at least {"confidence": <0-1>, "seed_id": "<seed>"}. generator_model must be the model name used.
+- Never invent references
+- Use exact verdict values "True" or "False"
+- Output array length must match input length
+- Each object must have: id, language, claim, context_chunk_id, context_excerpt, verdict, explanation, reference, suspected_fabrication, generator_model, raw_response_path, meta
 
-Return only the JSON array.
-"""
+Return ONLY the JSON array:
+'''
 
-def prepare_verifier_request(items: List[Dict], max_tokens: int):
-    # Build the request text for the Gemini model
-    prompt_text = VERIFIER_PROMPT + "\n\nINPUT_ITEMS_JSON:\n" + json.dumps(items, ensure_ascii=False)
-    return prompt_text
+def prepare_verifier_request(items: List[Dict], max_tokens: int) -> str:
+    """Prepare verification request"""
+    return VERIFIER_PROMPT + "\n\nINPUT_ITEMS:\n" + json.dumps(items, ensure_ascii=False)
 
 def batch_verify(items: List[Dict]) -> List[Dict]:
-    """
-    items: list dict with id, claim, context_excerpt, language, context_chunk_id
-    returns: parsed verification objects in the same order
-    """
+    """Batch verify items using new Google GenAI SDK"""
     assert len(items) <= BATCH_SIZE, f"batch size must be <= {BATCH_SIZE}"
-    # ensure truncation
-    for it in items:
-        it["context_excerpt"] = it.get("context_excerpt","")[:CONTEXT_MAX_CHARS]
+    
+    # Ensure truncation
+    for item in items:
+        item["context_excerpt"] = item.get("context_excerpt", "")[:CONTEXT_MAX_CHARS]
 
-    # estimate tokens per item; conservative default
-    est_tokens_per_item = 300
-    max_tokens = min(MAX_OUTPUT_TOKENS, est_tokens_per_item * max(1, len(items)))
-
+    # Calculate tokens conservatively - increase max_tokens significantly
+    est_tokens_per_item = 400  # Increased estimate
+    max_tokens = min(MAX_OUTPUT_TOKENS * 2, est_tokens_per_item * max(1, len(items)))  # Double the limit
+    
     last_err = None
     last_raw_path = None
 
@@ -333,31 +241,33 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
         try:
             prompt_text = prepare_verifier_request(items, max_tokens)
             resp_text = send_verify_request(VERIFIER_MODEL, api_key, prompt_text, max_tokens, attempt)
-            # Save the raw response using the updated function
-            raw_path = save_raw_response(resp_text, f"verify_{VERIFIER_MODEL}", attempt)
-
+            
             parsed = robust_parse_json_array(resp_text)
             if parsed is None:
-                raise ValueError("robust_parse_json_array returned None")
-            if not isinstance(parsed, list) or len(parsed) != len(items):
-                # If length mismatch, attempt to wrap single object into array
-                if isinstance(parsed, dict):
-                    parsed = [parsed]
+                raise ValueError("Failed to parse JSON response")
+            
+            if len(parsed) != len(items):
+                if isinstance(parsed, list) and len(parsed) == 1 and len(items) == 1:
+                    # Single item case
+                    pass
+                elif len(parsed) == 0:
+                    raise ValueError("Empty response array")
                 else:
-                    raise ValueError(f"Parsed length mismatch: parsed_len={len(parsed) if isinstance(parsed, list) else 'NA'} expected={len(items)}")
+                    logger.warning(f"Length mismatch: got {len(parsed)}, expected {len(items)}")
 
-            # annotate raw path and generator_model
-            for p in parsed:
-                p.setdefault("raw_response_path", raw_path)
-                p.setdefault("generator_model", VERIFIER_MODEL)
+            # Annotate results
+            for i, result in enumerate(parsed):
+                result.setdefault("raw_response_path", save_raw_response(resp_text, VERIFIER_MODEL, attempt))
+                result.setdefault("generator_model", VERIFIER_MODEL)
+                result.setdefault("meta", {}).setdefault("confidence", 0.5)
+            
             return parsed
 
-        except NoTextPartsError as e:
+        except Exception as e:
             last_err = e
-            last_raw_path = str(e).split("Raw saved to ")[-1] if "Raw saved to" in str(e) else None
-            logger.error("No text parts error with key index %d, attempt %d: %s", key_index, attempt, str(e))
-
-            # Create manual review items for each candidate
+            logger.error(f"Verification failed with key {key_index}, attempt {attempt}: {str(e)}")
+            
+            # Create manual review items
             for item in items:
                 create_manual_review_item(
                     item.get("id", "unknown"),
@@ -366,31 +276,17 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
                     last_raw_path or "unknown",
                     VERIFIER_MODEL,
                     key_index,
-                    f"NoTextPartsError: {str(e)}"
+                    f"Attempt {attempt}: {str(e)}"
                 )
 
             if attempt < MAX_RETRIES:
                 wait_time = backoff_with_jitter(attempt)
                 logger.info(f"Backing off for {wait_time:.2f}s (attempt {attempt})")
                 time.sleep(wait_time)
-                continue
-            else:
-                break
 
-        except Exception as e:
-            last_err = e
-            logger.error("Unexpected error with key index %d, attempt %d: %s", key_index, attempt, str(e))
-            if attempt < MAX_RETRIES:
-                wait_time = backoff_with_jitter(attempt)
-                logger.info(f"Backing off for {wait_time:.2f}s (attempt {attempt})")
-                time.sleep(wait_time)
-                continue
-            else:
-                break
+    logger.error(f"Batch verify failed after {MAX_RETRIES} attempts: {last_err}")
 
-    logger.error("Batch verify failed after %d attempts: %s", MAX_RETRIES, last_err)
-
-    # Return failed verification results for each item
+    # Return failed verification results
     failed_results = []
     for item in items:
         failed_result = {
@@ -412,7 +308,7 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
     return failed_results
 
 def batch_verify_single(items: List[Dict]) -> List[Dict]:
-    """Verify candidates one by one (fallback for failed batch verification)"""
+    """Verify candidates one by one (fallback)"""
     results = []
     for item in items:
         single_result = batch_verify([item])
@@ -421,48 +317,28 @@ def batch_verify_single(items: List[Dict]) -> List[Dict]:
 
 # Legacy GeminiClient class for backward compatibility
 class GeminiClient:
-    """Legacy wrapper to maintain compatibility with existing code"""
+    """Legacy wrapper using new Google GenAI SDK"""
 
     def __init__(self, config_file: str):
         self.logger = logging.getLogger(__name__)
         self.lock = threading.Lock()
-
-        # Use the centralized API keys
         self.api_keys = API_KEYS
         self.current_key_index = 0
-        self.key_states = {i: {"blocked_until": 0, "requests_made": 0, "last_response": None}
+        self.key_states = {i: {"blocked_until": 0, "requests_made": 0}
                           for i in range(len(self.api_keys))}
-
-        # Create raw responses directory
         Path("raw").mkdir(exist_ok=True)
 
-        # Use centralized models
-        self.models = MODELS
-
     def _get_next_available_key(self) -> Tuple[Optional[str], int]:
-        """Get next available API key, rotating if current is blocked"""
+        """Get next available API key"""
         with self.lock:
             current_time = time.time()
-
-            # Check if current key is available
-            current_state = self.key_states[self.current_key_index]
-            if current_state["blocked_until"] <= current_time:
-                key = self.api_keys[self.current_key_index]
-                return key, self.current_key_index
-
-            # Find next available key
+            
             for i in range(len(self.api_keys)):
-                next_index = (self.current_key_index + i + 1) % len(self.api_keys)
+                next_index = (self.current_key_index + i) % len(self.api_keys)
                 if self.key_states[next_index]["blocked_until"] <= current_time:
                     self.current_key_index = next_index
-                    key = self.api_keys[next_index]
-                    return key, next_index
-
-            # All keys are blocked, find the one that unblocks soonest
-            min_blocked_until = min(state["blocked_until"] for state in self.key_states.values())
-            wait_time = max(0, min_blocked_until - current_time)
-            self.logger.warning(f"All keys blocked. Waiting {wait_time:.1f}s until next available")
-
+                    return self.api_keys[next_index], next_index
+            
             return None, -1
 
     def _block_key(self, key_index: int, duration: int = 300):
@@ -471,76 +347,38 @@ class GeminiClient:
             self.key_states[key_index]["blocked_until"] = time.time() + duration
             self.logger.warning(f"Blocked key {key_index} for {duration}s")
 
-    def _save_raw_response(self, prompt: str, response: str, model: str, key_index: int) -> str:
-        """Save raw API request and response"""
-        timestamp = int(time.time())
-        filename = f"raw/{timestamp}_{key_index}_{model.replace('/', '_')}.resp.txt"
-
-        try:
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write(f"TIMESTAMP: {timestamp}\n")
-                f.write(f"MODEL: {model}\n")
-                f.write(f"KEY_INDEX: {key_index}\n")
-                f.write(f"PROMPT:\n{prompt}\n")
-                f.write(f"\nRESPONSE:\n{response}\n")
-            return filename
-        except Exception as e:
-            self.logger.error(f"Failed to save raw response: {e}")
-            return ""
-
-    def call_model(self, prompt: str, model: str = "models/gemini-2.5-pro", max_tokens: int = 8192,
+    def call_model(self, prompt: str, model: str = "models/gemini-2.5-flash", max_tokens: int = 8192,
                    temperature: float = 0.0, max_attempts: int = 3) -> Dict:
-        """Call Gemini model with robust error handling and key rotation"""
-
+        """Call Gemini model using new SDK"""
+        
         for attempt in range(max_attempts):
             key, key_index = self._get_next_available_key()
-
+            
             if key is None:
-                # All keys blocked, wait for next available
-                min_blocked_until = min(state["blocked_until"] for state in self.key_states.values())
-                wait_time = max(0, min_blocked_until - time.time())
-                if wait_time > 0:
-                    self.logger.info(f"Waiting {wait_time:.1f}s for key to become available")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    return {"success": False, "error": "No API keys available", "raw_text": ""}
+                return {"success": False, "error": "No API keys available", "raw_text": ""}
 
             try:
-                # Configure the API key
-                genai.configure(api_key=key)
-
-                # Configure the model
-                generation_config = genai.GenerationConfig(
+                client = genai.Client(api_key=key)
+                
+                config = types.GenerateContentConfig(
                     temperature=temperature,
                     max_output_tokens=max_tokens,
                 )
 
-                model_obj = genai.GenerativeModel(
-                    model_name=model,
-                    generation_config=generation_config
-                )
-
-                # Make the API call
                 start_time = time.time()
-                response = model_obj.generate_content(prompt)
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=config
+                )
                 latency = time.time() - start_time
 
                 # Update key state
                 with self.lock:
                     self.key_states[key_index]["requests_made"] += 1
-                    self.key_states[key_index]["last_response"] = time.time()
 
-                # Use robust text extraction from parsed response
-                body_dict = safe_serialize_response(response) # Ensure response is serialized safely
-                response_text = extract_text_from_parsed(body_dict)
-
-                if response_text is None:
-                    logger.warning(f"No text extracted from {model}, attempt {attempt + 1}")
-                    response_text = "" # Ensure it's an empty string if extraction fails
-                    save_raw_body(response, "notext")
-
-                raw_path = self._save_raw_response(prompt, response_text, model, key_index)
+                raw_path = save_raw_response(response, model, attempt)
+                response_text = response.text if hasattr(response, 'text') else ""
 
                 return {
                     "success": True,
@@ -551,95 +389,18 @@ class GeminiClient:
                     "raw_response_path": raw_path
                 }
 
-            except google_exceptions.ResourceExhausted as e:
-                self.logger.warning(f"Key {key_index} quota exhausted: {e}")
-                self._block_key(key_index, 300)  # Block for 5 minutes
-                continue
-
-            except google_exceptions.TooManyRequests as e:
-                self.logger.warning(f"Rate limit hit for key {key_index}: {e}")
-                self._block_key(key_index, 60)  # Block for 1 minute
-                continue
-
             except Exception as e:
-                self.logger.error(f"Unexpected error with key {key_index}, attempt {attempt + 1}: {e}")
-                # Save raw response on any exception for debugging
-                try:
-                    save_raw_body(response, f"exception_{attempt+1}")
-                except NameError: # response might not be defined if error happened before its assignment
-                    pass
-
+                self.logger.error(f"Error with key {key_index}, attempt {attempt + 1}: {e}")
+                
+                if "quota" in str(e).lower() or "exhausted" in str(e).lower():
+                    self._block_key(key_index, 300)
+                elif "rate" in str(e).lower():
+                    self._block_key(key_index, 60)
+                
                 if attempt < max_attempts - 1:
                     wait_time = backoff_with_jitter(attempt)
-                    logger.info(f"Backing off for {wait_time:.2f}s (attempt {attempt})")
                     time.sleep(wait_time)
-                    continue
                 else:
                     return {"success": False, "error": str(e), "raw_text": ""}
 
         return {"success": False, "error": "Max attempts exceeded", "raw_text": ""}
-
-
-def safe_serialize_response(response):
-    """ Safely serializes the response object, returning a dictionary. """
-    try:
-        # Try different protobuf attributes
-        if hasattr(response, "_pb"):
-            return MessageToDict(response._pb)
-        elif hasattr(response, "_raw_response"):
-            return MessageToDict(response._raw_response)
-        elif hasattr(response, "candidates"):
-            # Handle Gemini response structure directly
-            return {
-                "candidates": [MessageToDict(c._pb) if hasattr(c, "_pb") else str(c) for c in response.candidates],
-                "prompt_feedback": str(getattr(response, "prompt_feedback", "")),
-                "usage_metadata": str(getattr(response, "usage_metadata", ""))
-            }
-        else:
-            return {"text": str(response)}
-    except Exception as e:
-        logger.warning(f"Could not serialize response with MessageToDict: {e}")
-        try:
-            return {"text": getattr(response, "text", str(response))}
-        except Exception:
-            return {"error": f"Serialization failed: {str(e)}", "raw": str(response)}
-
-
-def extract_text_from_parsed(body_dict: Dict) -> Optional[str]:
-    """
-    Extracts text from a parsed response dictionary, looking into candidates.
-    """
-    if not isinstance(body_dict, dict):
-        return None
-
-    # Prioritize 'candidates' which is common in Gemini API responses
-    for candidate_list_key in ["candidates", "outputs", "choices", "responses"]:
-        candidates = body_dict.get(candidate_list_key)
-        if isinstance(candidates, list) and candidates:
-            first_candidate = candidates[0]
-            if isinstance(first_candidate, dict):
-                # Look for 'content' which often contains 'parts'
-                content = first_candidate.get("content")
-                if isinstance(content, dict) and "parts" in content:
-                    parts = content["parts"]
-                    if isinstance(parts, list):
-                        # Extract text from each part
-                        text_parts = [p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p]
-                        return "".join(text_parts)
-                # If no 'parts', the 'content' itself might be the text
-                if isinstance(content, str):
-                    return content
-                # Check if 'text' is directly in the candidate
-                if "text" in first_candidate and isinstance(first_candidate["text"], str):
-                    return first_candidate["text"]
-                # Check for 'finish_reason' to understand if response was cut short
-                if first_candidate.get("finish_reason") in ["MAX_TOKENS", "OTHER", "SAFETY"]:
-                    logger.warning(f"Response may be truncated due to finish_reason: {first_candidate.get('finish_reason')}")
-
-
-    # Fallback to top-level keys if candidates structure not found
-    for key in ["output_text", "response_text", "text", "content", "message"]:
-        if isinstance(body_dict.get(key), str):
-            return body_dict.get(key)
-
-    return None

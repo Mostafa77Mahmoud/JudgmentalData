@@ -254,8 +254,10 @@ class DatasetGenerator:
             item_id = candidate.get("id", "")
             seed_id = candidate.get("meta", {}).get("seed_id", "")
 
-            if chunk_id >= len(chunks):
-                continue
+            # Ensure chunk_id is valid
+            if not isinstance(chunk_id, int) or chunk_id >= len(chunks):
+                chunk_id = 0
+                candidate["context_chunk_id"] = 0
 
             chunk_text = chunks[chunk_id].get("text", "")
 
@@ -275,9 +277,8 @@ class DatasetGenerator:
                     }) + "\n")
 
             # Try local verification first
-            valid_chunk_id = chunk_id if isinstance(chunk_id, int) else 0
             is_local_verified, local_result = self._local_verify_one(
-                claim, chunk_text, item_id, valid_chunk_id, language, seed_id
+                claim, chunk_text, item_id, chunk_id, language, seed_id
             )
 
             if is_local_verified and local_result:
@@ -489,7 +490,7 @@ class DatasetGenerator:
         total = len(examples)
         true_count = sum(1 for ex in examples if ex.get("verdict") == "True")
         false_count = sum(1 for ex in examples if ex.get("verdict") == "False")
-        fabrication_count = sum(1 for ex in examples if ex.get("suspected_fabrication"))
+        fabrication_count = sum(1 for ex in examples if ex.get("suspected_fabrication") is True)
 
         return {
             "total": total,
@@ -525,11 +526,11 @@ class DatasetGenerator:
 
         # Select seeds for smoke test
         seeds_data = self.arabic_seeds if language == "ar" else self.english_seeds
-        if not seeds_data:
+        if not seeds_data or len(seeds_data) == 0:
             raise ValueError(f"No seeds data available for language {language}")
         
         sample_size = min(target_count, len(seeds_data))
-        smoke_seeds = random.sample(seeds_data, sample_size)
+        smoke_seeds = random.sample(list(seeds_data), sample_size)
 
         # Generate candidates
         candidates = self._generate_candidates_from_seeds(smoke_seeds, language)
@@ -606,7 +607,7 @@ class DatasetGenerator:
 
         # Process seeds in batches
         batch_size = 50
-        if not seeds_data:
+        if not seeds_data or len(seeds_data) == 0:
             raise ValueError(f"No seeds data available for language {language}")
             
         while len(all_examples) < target and processed_seeds < len(seeds_data):
