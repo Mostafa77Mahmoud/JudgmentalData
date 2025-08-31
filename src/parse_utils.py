@@ -3,6 +3,10 @@ import re
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+# استدعاء الكونفيج من مكان واحد
+from .gemini_config import CONTEXT_MAX_CHARS
+
+
 def parse_json_loose(text: str) -> Optional[Any]:
     """Robust JSON parsing with fallback strategies"""
     logger = logging.getLogger(__name__)
@@ -25,7 +29,7 @@ def parse_json_loose(text: str) -> Optional[Any]:
     # Try to find JSON object or array
     json_patterns = [
         r'\{.*\}',  # JSON object
-        r'\[.*\]'   # JSON array
+        r'\[.*\]'  # JSON array
     ]
 
     for pattern in json_patterns:
@@ -49,7 +53,7 @@ def parse_json_loose(text: str) -> Optional[Any]:
             elif char == end_char:
                 depth -= 1
                 if depth == 0:
-                    candidate = text[start_idx:i+1]
+                    candidate = text[start_idx:i + 1]
                     try:
                         return json.loads(candidate)
                     except json.JSONDecodeError:
@@ -57,6 +61,7 @@ def parse_json_loose(text: str) -> Optional[Any]:
 
     logger.warning(f"Failed to parse JSON from text: {text[:200]}...")
     return None
+
 
 def compute_token_overlap(ref_text: str, chunk_text: str) -> float:
     """Compute token overlap between reference and chunk text"""
@@ -72,6 +77,7 @@ def compute_token_overlap(ref_text: str, chunk_text: str) -> float:
 
     intersection = ref_tokens.intersection(chunk_tokens)
     return len(intersection) / len(ref_tokens)
+
 
 def normalize_text_for_overlap(text: str) -> str:
     """Normalize text for token overlap computation"""
@@ -93,7 +99,9 @@ def normalize_text_for_overlap(text: str) -> str:
 
     return text.strip()
 
-def validate_example_schema(example: Dict, required_fields: List[str]) -> Tuple[bool, str]:
+
+def validate_example_schema(example: Dict,
+                            required_fields: List[str]) -> Tuple[bool, str]:
     """Validate example has required fields and proper data types"""
 
     # Check required fields
@@ -111,14 +119,14 @@ def validate_example_schema(example: Dict, required_fields: List[str]) -> Tuple[
     if not isinstance(example.get("claim"), str) or len(example["claim"]) == 0:
         return False, "claim must be non-empty string"
 
-    if not isinstance(example.get("context_chunk_id"), int) or example["context_chunk_id"] < 0:
+    if not isinstance(example.get("context_chunk_id"),
+                      int) or example["context_chunk_id"] < 0:
         return False, "context_chunk_id must be non-negative integer"
 
     # Check context excerpt length using config value
-    from .gemini_config import CONTEXT_MAX_CHARS
     context_excerpt = example.get("context_excerpt", "")
     if len(context_excerpt) > CONTEXT_MAX_CHARS:
-        return False, f"context_excerpt exceeds {CONTEXT_MAX_CHARS} characters"
+        return False, f"context_excerpt exceeds {CONTEXT_MAX_CHARS} characters (got {len(context_excerpt)})"
 
     if example.get("verdict") not in ["True", "False", "Unknown"]:
         return False, "verdict must be 'True', 'False', or 'Unknown'"
@@ -140,6 +148,7 @@ def validate_example_schema(example: Dict, required_fields: List[str]) -> Tuple[
 
     return True, "Valid"
 
+
 def find_exact_substring(reference: str, chunk_text: str) -> Optional[str]:
     """Find exact substring match in chunk text"""
     if not reference or not chunk_text or reference == "UNKNOWN":
@@ -159,7 +168,7 @@ def find_exact_substring(reference: str, chunk_text: str) -> Optional[str]:
         chunk_words = chunk_text.split()
 
         for i in range(len(chunk_words) - len(ref_words) + 1):
-            candidate = ' '.join(chunk_words[i:i+len(ref_words)])
+            candidate = ' '.join(chunk_words[i:i + len(ref_words)])
             if normalize_text_for_overlap(candidate) == norm_ref:
                 return candidate
 

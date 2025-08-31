@@ -5,7 +5,7 @@
     "AIzaSyAIPk1An1O6sZiro64Q4R9PjVrqvPkSVvQ",
     "AIzaSyAIPk1An1O6sZiro64Q4R9PjVrqvPkSVvQ"
   ],
-  "DEFAULT_MODELS": ["gemini-2.5-flash", "gemini-2.5-flash-lite"],
+  "DEFAULT_MODELS": ["gemini-2.5-pro","gemini-2.5-flash", "gemini-2.5-flash-lite"],
   "SINGLE_MODEL_FALLBACK": null,
   "MAX_FABRICATION_RATE": 0.10,
   "BATCH_SIZE": 4,
