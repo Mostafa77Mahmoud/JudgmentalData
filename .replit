@@ -1,12 +1,12 @@
-entrypoint = "app.py"
 modules = ["python-3.11"]
+run = "streamlit run app.py"
 
 [nix]
-channel = "stable-24_05"
+channel = "stable-25_05"
 packages = ["glibcLocales"]
 
 [deployment]
-run = ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=5000"]
+run = ["sh", "-c", "streamlit run app.py"]
 deploymentTarget = "cloudrun"
 
 [[ports]]
