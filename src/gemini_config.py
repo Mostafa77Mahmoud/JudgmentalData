@@ -10,9 +10,8 @@ if config_file.exists():
         config = json.load(f)
 
     API_KEYS = config.get("API_KEYS", [])
-    MODELS = config.get(
-        "DEFAULT_MODELS",
-        ["gemini-2.5-flash", "gemini-2.5-flash-lite"])
+    MODELS = config.get("DEFAULT_MODELS",
+                        ["gemini-2.5-flash", "gemini-2.5-flash-lite"])
     SINGLE_MODEL_FALLBACK = config.get("SINGLE_MODEL_FALLBACK")
     MAX_FABRICATION_RATE = config.get("MAX_FABRICATION_RATE", 0.10)
     BATCH_SIZE = config.get("BATCH_SIZE", 4)
@@ -31,14 +30,14 @@ else:
         os.getenv("GEMINI_KEY_4")
     ]
     API_KEYS = [key for key in API_KEYS if key]
-    MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+    MODELS = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"]
     SINGLE_MODEL_FALLBACK = os.getenv("SINGLE_MODEL_FALLBACK")
     MAX_FABRICATION_RATE = float(os.getenv("MAX_FABRICATION_RATE", "0.10"))
     BATCH_SIZE = int(os.getenv("BATCH_SIZE", "4"))
     CONTEXT_MAX_CHARS = int(os.getenv("CONTEXT_MAX_CHARS", "2500"))
-    MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "2048"))
+    MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "60000"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
-    VERIFIER_MODEL = os.getenv("VERIFIER_MODEL", "gemini-1.5-flash")
+    VERIFIER_MODEL = os.getenv("VERIFIER_MODEL", "gemini-2.5-flash")
     VERIFIER_TEMPERATURE = float(os.getenv("VERIFIER_TEMPERATURE", "0.0"))
 
 # Use single model fallback if specified

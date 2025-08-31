@@ -1,0 +1,21 @@
+response:
+GenerateContentResponse(
+    done=True,
+    iterator=None,
+    result=protos.GenerateContentResponse({
+      "candidates": [
+        {
+          "content": {
+            "role": "model"
+          },
+          "finish_reason": "MAX_TOKENS",
+          "index": 0
+        }
+      ],
+      "usage_metadata": {
+        "prompt_token_count": 9732,
+        "total_token_count": 12131
+      },
+      "model_version": "gemini-2.5-flash"
+    }),
+)

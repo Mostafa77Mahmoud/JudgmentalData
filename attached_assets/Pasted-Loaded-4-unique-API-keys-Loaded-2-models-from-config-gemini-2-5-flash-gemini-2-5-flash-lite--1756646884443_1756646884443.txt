@@ -1,0 +1,37 @@
+Loaded 4 unique API keys
+Loaded 2 models from config: ['gemini-2.5-flash', 'gemini-2.5-flash-lite']
+2025-08-31 13:26:50,232 - src.dataset_generator - INFO - Loaded pre-chunked data from chunks.json files
+2025-08-31 13:26:50,234 - src.dataset_generator - INFO - Loaded 610 Arabic seeds, 575 English seeds
+2025-08-31 13:26:54,704 - src.dataset_generator - INFO - Starting smoke test for ar with 20 examples
+2025-08-31 13:26:57,333 - src.dataset_generator - INFO - Generated 24 candidates
+2025-08-31 13:26:57,333 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,334 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,335 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,336 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,337 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,338 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,339 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,340 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,341 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,342 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,343 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,344 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,344 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,345 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,345 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,346 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,347 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,347 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,348 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,350 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,350 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,351 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,351 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,352 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:26:57,353 - src.dataset_generator - INFO - Local verification: 4 verified, 20 need model
+2025-08-31 13:27:09,795 - src.gemini_client - ERROR - API call failed, error saved to raw/1756646829795_error_1_att1.resp.json
+2025-08-31 13:27:09,796 - src.gemini_client - ERROR - Verification failed with key 0, attempt 1: Response truncated due to MAX_TOKENS. Increase max_output_tokens. Raw saved to raw/1756646829793_verify_gemini-2.5-flash_att1.resp.txt
+2025-08-31 13:27:09,796 - src.gemini_client - INFO - Backing off for 2.15s (attempt 1)
+2025-08-31 13:27:22,209 - src.gemini_client - ERROR - API call failed, error saved to raw/1756646842208_error_2_att2.resp.json
+2025-08-31 13:27:22,209 - src.gemini_client - ERROR - Verification failed with key 1, attempt 2: Response truncated due to MAX_TOKENS. Increase max_output_tokens. Raw saved to raw/1756646842206_verify_gemini-2.5-flash_att2.resp.txt
+2025-08-31 13:27:22,209 - src.gemini_client - INFO - Backing off for 4.23s (attempt 2)
