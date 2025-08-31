@@ -7,8 +7,19 @@ import threading
 import re
 from typing import List, Dict, Optional, Tuple, Any, Union
 from pathlib import Path
-from google import genai
-from google.genai import types
+
+# Try new Google GenAI SDK first, fallback to old if needed
+try:
+    from google import genai
+    from google.genai import types
+    USE_NEW_SDK = True
+except ImportError:
+    try:
+        import google.generativeai as genai
+        USE_NEW_SDK = False
+    except ImportError:
+        raise ImportError("Neither google-genai nor google-generativeai is available")
+
 from src.gemini_config import API_KEYS, MODELS, BATCH_SIZE, MAX_RETRIES, CONTEXT_MAX_CHARS, VERIFIER_MODEL, VERIFIER_TEMPERATURE, MAX_OUTPUT_TOKENS, MAX_INPUT_TOKENS
 
 # Add missing constants
@@ -187,19 +198,32 @@ def _build_verify_prompt(items: List[Dict], lang: str) -> str:
 def send_verify_request(model_name: str, api_key: str, items: List[Dict], lang: str, attempt: int) -> List[Dict]:
     """Send structured verification request using Google GenAI SDK"""
     try:
-        client = genai.Client(api_key=api_key)
-
-        prompt_text = _build_verify_prompt(items, lang)
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt_text,
-            config=types.GenerateContentConfig(
-                temperature=0.0,
-                max_output_tokens=1200,
-                response_mime_type="application/json",
-                response_schema=_verify_schema()
+        if USE_NEW_SDK:
+            client = genai.Client(api_key=api_key)
+            prompt_text = _build_verify_prompt(items, lang)
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt_text,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    max_output_tokens=1200,
+                    response_mime_type="application/json",
+                    response_schema=_verify_schema()
+                )
             )
-        )
+        else:
+            # Fallback to old SDK
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel(model_name)
+            prompt_text = _build_verify_prompt(items, lang)
+            response = model.generate_content(
+                prompt_text,
+                generation_config=genai.GenerationConfig(
+                    temperature=0.0,
+                    max_output_tokens=1200,
+                    response_mime_type="application/json"
+                )
+            )
 
         # Save raw response for debugging
         raw_path = save_raw_response(response, f"verify_{model_name}", attempt)
@@ -584,24 +608,39 @@ class GeminiClient:
                 }
 
             try:
-                client = genai.Client(api_key=key)
+                if USE_NEW_SDK:
+                    client = genai.Client(api_key=key)
+                    
+                    # Check input token estimate
+                    estimated_input_tokens = len(prompt) // 3  # Rough estimate
+                    if estimated_input_tokens > MAX_INPUT_TOKENS:
+                        self.logger.warning(f"Input tokens ({estimated_input_tokens}) may exceed limit ({MAX_INPUT_TOKENS})")
 
-                # Check input token estimate
-                estimated_input_tokens = len(prompt) // 3  # Rough estimate
-                if estimated_input_tokens > MAX_INPUT_TOKENS:
-                    self.logger.warning(f"Input tokens ({estimated_input_tokens}) may exceed limit ({MAX_INPUT_TOKENS})")
-
-                start_time = time.time()
-                response = client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=temperature,
-                        max_output_tokens=min(max_tokens, 2000),
-                        response_mime_type="application/json"
+                    start_time = time.time()
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            temperature=temperature,
+                            max_output_tokens=min(max_tokens, 2000),
+                            response_mime_type="application/json"
+                        )
                     )
-                )
-                latency = time.time() - start_time
+                    latency = time.time() - start_time
+                else:
+                    # Fallback to old SDK
+                    genai.configure(api_key=key)
+                    model_instance = genai.GenerativeModel(model)
+                    
+                    start_time = time.time()
+                    response = model_instance.generate_content(
+                        prompt,
+                        generation_config=genai.GenerationConfig(
+                            temperature=temperature,
+                            max_output_tokens=min(max_tokens, 2000)
+                        )
+                    )
+                    latency = time.time() - start_time
 
                 # Handle response with new SDK format
                 text_content = None
