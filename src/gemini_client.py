@@ -15,7 +15,7 @@ try:
     USE_NEW_SDK = True
 except ImportError:
     try:
-        import google.generativeai as genai
+        from google import genai
         USE_NEW_SDK = False
     except ImportError:
         raise ImportError("Neither google-genai nor google-generativeai is available")
