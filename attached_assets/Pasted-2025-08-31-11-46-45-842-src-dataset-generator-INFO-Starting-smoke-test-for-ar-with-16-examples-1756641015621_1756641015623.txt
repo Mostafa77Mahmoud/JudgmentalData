@@ -1,0 +1,63 @@
+2025-08-31 11:46:45,842 - src.dataset_generator - INFO - Starting smoke test for ar with 16 examples
+2025-08-31 11:46:49,300 - src.dataset_generator - INFO - Generated 19 candidates
+2025-08-31 11:46:49,300 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,302 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,303 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,305 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,305 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,306 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,307 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,307 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,308 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,309 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,311 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,313 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,314 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,315 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,315 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,315 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,316 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,316 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,320 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 11:46:49,321 - src.dataset_generator - INFO - Local verification: 3 verified, 16 need model
+2025-08-31 11:46:55,004 - src.gemini_client - ERROR - Unexpected error with key index 0, attempt 1: name 'save_raw_response' is not defined
+2025-08-31 11:46:55,004 - src.gemini_client - INFO - backoff sleep: 1.09s (attempt 1)
+2025-08-31 11:47:02,164 - src.gemini_client - ERROR - Unexpected error with key index 1, attempt 2: name 'save_raw_response' is not defined
+2025-08-31 11:47:02,164 - src.gemini_client - INFO - backoff sleep: 2.08s (attempt 2)
+2025-08-31 11:47:10,344 - src.gemini_client - ERROR - Unexpected error with key index 2, attempt 3: name 'save_raw_response' is not defined
+2025-08-31 11:47:10,344 - src.gemini_client - INFO - backoff sleep: 4.01s (attempt 3)
+2025-08-31 11:47:20,876 - src.gemini_client - ERROR - Unexpected error with key index 3, attempt 4: name 'save_raw_response' is not defined
+2025-08-31 11:47:20,876 - src.gemini_client - INFO - backoff sleep: 8.76s (attempt 4)
+2025-08-31 11:47:36,197 - src.gemini_client - ERROR - Unexpected error with key index 0, attempt 5: name 'save_raw_response' is not defined
+2025-08-31 11:47:36,197 - src.gemini_client - ERROR - Batch verify failed after 5 attempts: name 'save_raw_response' is not defined
+2025-08-31 11:47:42,851 - src.gemini_client - ERROR - Unexpected error with key index 0, attempt 1: name 'save_raw_response' is not defined
+2025-08-31 11:47:42,851 - src.gemini_client - INFO - backoff sleep: 1.01s (attempt 1)
+2025-08-31 11:47:51,912 - src.gemini_client - ERROR - Unexpected error with key index 1, attempt 2: name 'save_raw_response' is not defined
+2025-08-31 11:47:51,912 - src.gemini_client - INFO - backoff sleep: 2.15s (attempt 2)
+2025-08-31 11:48:00,807 - src.gemini_client - ERROR - Unexpected error with key index 2, attempt 3: name 'save_raw_response' is not defined
+2025-08-31 11:48:00,807 - src.gemini_client - INFO - backoff sleep: 4.33s (attempt 3)
+2025-08-31 11:48:10,442 - src.gemini_client - ERROR - Unexpected error with key index 3, attempt 4: name 'save_raw_response' is not defined
+2025-08-31 11:48:10,442 - src.gemini_client - INFO - backoff sleep: 8.11s (attempt 4)
+2025-08-31 11:48:23,451 - src.gemini_client - ERROR - Unexpected error with key index 0, attempt 5: name 'save_raw_response' is not defined
+2025-08-31 11:48:23,451 - src.gemini_client - ERROR - Batch verify failed after 5 attempts: name 'save_raw_response' is not defined
+2025-08-31 11:48:29,379 - src.gemini_client - ERROR - Unexpected error with key index 0, attempt 1: name 'save_raw_response' is not defined
+2025-08-31 11:48:29,379 - src.gemini_client - INFO - backoff sleep: 1.08s (attempt 1)
+2025-08-31 11:48:37,333 - src.gemini_client - ERROR - Unexpected error with key index 1, attempt 2: name 'save_raw_response' is not defined
+2025-08-31 11:48:37,334 - src.gemini_client - INFO - backoff sleep: 2.04s (attempt 2)
+2025-08-31 11:48:44,739 - src.gemini_client - ERROR - Unexpected error with key index 2, attempt 3: name 'save_raw_response' is not defined
+2025-08-31 11:48:44,740 - src.gemini_client - INFO - backoff sleep: 4.03s (attempt 3)
+2025-08-31 11:48:54,042 - src.gemini_client - ERROR - Unexpected error with key index 3, attempt 4: name 'save_raw_response' is not defined
+2025-08-31 11:48:54,042 - src.gemini_client - INFO - backoff sleep: 8.19s (attempt 4)
+2025-08-31 11:49:07,317 - src.gemini_client - ERROR - Unexpected error with key index 0, attempt 5: name 'save_raw_response' is not defined
+2025-08-31 11:49:07,317 - src.gemini_client - ERROR - Batch verify failed after 5 attempts: name 'save_raw_response' is not defined
+2025-08-31 11:49:14,089 - src.gemini_client - ERROR - Unexpected error with key index 0, attempt 1: name 'save_raw_response' is not defined
+2025-08-31 11:49:14,090 - src.gemini_client - INFO - backoff sleep: 1.02s (attempt 1)
+2025-08-31 11:49:21,461 - src.gemini_client - ERROR - Unexpected error with key index 1, attempt 2: name 'save_raw_response' is not defined
+2025-08-31 11:49:21,461 - src.gemini_client - INFO - backoff sleep: 2.17s (attempt 2)
+2025-08-31 11:49:29,327 - src.gemini_client - ERROR - Unexpected error with key index 2, attempt 3: name 'save_raw_response' is not defined
+2025-08-31 11:49:29,328 - src.gemini_client - INFO - backoff sleep: 4.14s (attempt 3)
+2025-08-31 11:49:40,489 - src.gemini_client - ERROR - Unexpected error with key index 3, attempt 4: name 'save_raw_response' is not defined
+2025-08-31 11:49:40,490 - src.gemini_client - INFO - backoff sleep: 8.15s (attempt 4)
+2025-08-31 11:49:53,914 - src.gemini_client - ERROR - Unexpected error with key index 0, attempt 5: name 'save_raw_response' is not defined
+2025-08-31 11:49:53,914 - src.gemini_client - ERROR - Batch verify failed after 5 attempts: name 'save_raw_response' is not defined
+2025-08-31 11:49:54,916 - src.dataset_generator - WARNING - High fabrication rate detected: 100.00% > 10.00%
