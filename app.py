@@ -29,7 +29,7 @@ def initialize_system():
         # Check for required files
         required_files = [
             "inputs/arabic_cleaned.txt",
-            "inputs/english_cleaned.txt", 
+            "inputs/english_cleaned.txt",
             "inputs/arabic_chunks.json",
             "inputs/english_chunks.json",
             "inputs/arabic_qa_pairs.json",
@@ -62,7 +62,7 @@ def initialize_system():
             api_keys = [
                 os.getenv("GEMINI_API_KEY"),
                 os.getenv("GEMINI_KEY_1"),
-                os.getenv("GEMINI_KEY_2"), 
+                os.getenv("GEMINI_KEY_2"),
                 os.getenv("GEMINI_KEY_3"),
                 os.getenv("GEMINI_KEY_4")
             ]
@@ -214,8 +214,8 @@ def dataset_generation_page():
 
         # Add strict mode toggle
         st.subheader("Generation Mode")
-        use_strict_mode = st.checkbox("Use Strict Local-First Mode", 
-                                    value=True, 
+        use_strict_mode = st.checkbox("Use Strict Local-First Mode",
+                                    value=True,
                                     help="Reduces API calls and prevents hallucination by using local verification first")
 
         if st.button("Generate Full Dataset"):
@@ -273,7 +273,7 @@ def system_status_page():
     required_files = [
         "inputs/arabic_cleaned.txt",
         "inputs/english_cleaned.txt",
-        "inputs/arabic_chunks.json", 
+        "inputs/arabic_chunks.json",
         "inputs/english_chunks.json",
         "inputs/arabic_qa_pairs.json",
         "inputs/english_qa_pairs.json"
@@ -295,8 +295,8 @@ def system_status_page():
     st.subheader("API Keys Status")
     # Add strict mode toggle
     st.subheader("Generation Mode")
-    use_strict_mode = st.checkbox("Use Strict Local-First Mode", 
-                                value=True, 
+    use_strict_mode = st.checkbox("Use Strict Local-First Mode",
+                                value=True,
                                 help="Reduces API calls and prevents hallucination by using local verification first")
 
     # Check keys from config file first, then environment variables
@@ -390,7 +390,7 @@ def data_explorer_page():
         ar_chunks = st.session_state.processor.arabic_chunks
         ar_qa = st.session_state.processor.arabic_qa_pairs
 
-        # English data  
+        # English data
         en_chunks = st.session_state.processor.english_chunks
         en_qa = st.session_state.processor.english_qa_pairs
 
@@ -407,7 +407,7 @@ def data_explorer_page():
         # Sample data viewer
         st.subheader("Sample Data")
 
-        data_type = st.selectbox("Select data type to explore", 
+        data_type = st.selectbox("Select data type to explore",
                                 ["Arabic Chunks", "English Chunks", "Arabic Q&A", "English Q&A"])
 
         if data_type == "Arabic Chunks" and ar_chunks:
@@ -425,7 +425,7 @@ def data_explorer_page():
             chunk = en_chunks[chunk_id]
             st.json({
                 "id": chunk.get("id"),
-                "word_count": chunk.get("word_count"), 
+                "word_count": chunk.get("word_count"),
                 "language": chunk.get("language"),
                 "text_preview": chunk.get("text", "")[:500] + "..." if len(chunk.get("text", "")) > 500 else chunk.get("text", "")
             })
