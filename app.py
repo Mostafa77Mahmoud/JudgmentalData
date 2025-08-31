@@ -211,7 +211,7 @@ def dataset_generation_page():
         st.markdown("Generate the complete dataset after smoke test passes")
 
         target_count = st.number_input("Target examples per language", min_value=100, max_value=5000, value=2000)
-        
+
         # Add strict mode toggle
         st.subheader("Generation Mode")
         use_strict_mode = st.checkbox("Use Strict Local-First Mode", 
