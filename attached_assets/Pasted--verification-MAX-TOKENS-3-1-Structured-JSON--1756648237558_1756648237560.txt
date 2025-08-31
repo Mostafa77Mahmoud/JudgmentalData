@@ -1,0 +1,208 @@
+لسه الـ verification بيتقصّ بسبب MAX_TOKENS. الحل الحاسم هنا 3 حاجات مع بعض: (1) Structured JSON حقيقي عبر response_mime_type + response_schema، (2) تقليل الشرح جدًا (حد أقصى 200 حرف)، و**(3) تقسيم الدفعات** (٥ عناصر فقط لكل كول). ده بيقفل باب الردود الطويلة تمامًا.
+
+حطّ التعديلات دي “كوبي-بيست” في ملفاتك:
+
+1) src/gemini_client.py
+# --- src/gemini_client.py ---
+
+import json
+import logging
+from typing import List, Dict, Any
+
+logger = logging.getLogger(__name__)
+
+# helper: chunk a list
+def chunked(lst, n):
+    for i in range(0, len(lst), n):
+        yield lst[i:i+n]
+
+def _verify_schema():
+    # JSON Schema for array of results
+    return {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "id": {"type": "string"},
+                "verdict": {"type": "string", "enum": ["valid", "invalid"]},
+                "explanation": {"type": "string", "maxLength": 200}
+            },
+            "required": ["id", "verdict", "explanation"]
+        }
+    }
+
+def _build_verify_prompt(items: List[Dict[str, Any]], lang: str) -> str:
+    # لا تعتمد فقط على البرومبت — هنستخدم كمان response_schema
+    if lang == "ar":
+        return (
+            "تحقق من الادعاءات التالية اعتمادًا على المقتطفات المرفقة فقط.\n"
+            "أعد فقط JSON صالح (بدون أي نص إضافي). كل عنصر يجب أن يحتوي:\n"
+            "id، verdict (valid/invalid)، explanation (≤ 200 حرف، موجز جدًا).\n"
+            "لا تُضِف مقدمات أو تعليقات.\n\n"
+            + json.dumps(items, ensure_ascii=False)
+        )
+    else:
+        return (
+            "Verify the following claims strictly using the provided excerpts only.\n"
+            "Return ONLY valid JSON (no extra text). Each item must have:\n"
+            "id, verdict (valid/invalid), explanation (≤ 200 chars, very concise).\n"
+            "No preface or commentary.\n\n"
+            + json.dumps(items, ensure_ascii=False)
+        )
+
+def send_verify_request(client, model: str, items: List[Dict[str, Any]], lang: str):
+    # Structured output + small cap
+    generation_config = {
+        "temperature": 0.0,
+        "candidate_count": 1,
+        "max_output_tokens": 1200,  # كافي لـ 5 عناصر مع شرح قصير
+        "response_mime_type": "application/json",
+        "response_schema": _verify_schema(),
+    }
+
+    prompt = _build_verify_prompt(items, lang)
+
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        generation_config=generation_config,
+    )
+
+    cand0 = (response.candidates or [None])[0]
+    if not cand0:
+        raise RuntimeError("No candidates returned from model.")
+
+    # finish_reason: 2 => MAX_TOKENS
+    fr = getattr(cand0, "finish_reason", None) or getattr(cand0, "finishReason", None)
+    if str(fr).endswith("MAX_TOKENS") or fr == 2:
+        raise RuntimeError("Truncated verification response (MAX_TOKENS).")
+
+    # استخرج النص بأمان
+    text = None
+    try:
+        text = response.text  # قد يرمي خطأ لو مفيش Part
+    except Exception:
+        parts = getattr(cand0, "content", None)
+        if parts and getattr(parts, "parts", None):
+            texts = [getattr(p, "text", "") for p in parts.parts if getattr(p, "text", None)]
+            text = "".join(texts).strip()
+
+    if not text:
+        # أخيرًا جرّب to_dict()
+        try:
+            as_dict = response.to_dict()
+            text = json.dumps(as_dict.get("candidates", [{}])[0].get("content", {}))
+        except Exception:
+            pass
+
+    if not text:
+        raise RuntimeError("Empty verification response text.")
+
+    # لازم يكون JSON Array
+    try:
+        data = json.loads(text)
+        if not isinstance(data, list):
+            raise ValueError("Verifier returned non-array JSON.")
+        return data
+    except Exception as e:
+        logger.error("Failed to parse JSON from verifier: %s\nRaw: %s", e, text[:500])
+        raise
+
+def batch_verify(client, model: str, lang: str, items: List[Dict[str, Any]], per_call: int = 5) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    for batch in chunked(items, per_call):
+        # حاول flash أولًا، ثم flash-lite لو حصل خطأ داخلي
+        try:
+            out = send_verify_request(client, model, batch, lang)
+        except RuntimeError as e:
+            msg = str(e)
+            if "internal error" in msg.lower():
+                out = send_verify_request(client, "gemini-2.5-flash-lite", batch, lang)
+            else:
+                raise
+        results.extend(out)
+    return results
+
+2) src/dataset_generator.py
+# --- src/dataset_generator.py ---
+
+import logging
+from typing import List, Dict, Any
+from .gemini_client import batch_verify
+
+logger = logging.getLogger(__name__)
+
+VERIFIER_ITEMS_PER_CALL = 5  # مهم: ٥ فقط لتأمين الحد الأقصى للـ tokens
+EXPLANATION_MAX_CHARS = 200  # نفس حد الـ schema
+
+def _pack_for_verifier(rows: List[Dict[str, Any]], lang: str) -> List[Dict[str, Any]]:
+    # هيكل موحد للعنصر
+    packed = []
+    for r in rows:
+        packed.append({
+            "id": r["id"],
+            "claim": r["claim"],
+            "context_excerpt": r["context_excerpt"],  # مختصر عندك لـ 512 فعليًا
+            # أي حقول زيادة بتزود نص — بلاش
+        })
+    return packed
+
+def verify_with_model(client, model: str, lang: str, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    items = _pack_for_verifier(rows, lang)
+    verified = batch_verify(client, model, lang, items, per_call=VERIFIER_ITEMS_PER_CALL)
+    # نعمل join بالـ id
+    out_map = {x["id"]: x for x in verified}
+    merged = []
+    for r in rows:
+        v = out_map.get(r["id"])
+        if not v:
+            logger.warning("Verifier missed id=%s", r["id"])
+            continue
+        merged.append({
+            **r,
+            "verdict": v["verdict"],
+            "explanation": v["explanation"][:EXPLANATION_MAX_CHARS],
+        })
+    return merged
+
+3) src/prompts.py
+
+لسه هنستخدم البرومبت للتوضيح، لكن التحكم الحقيقي بييجي من response_schema. خليه صارم وقصير:
+
+# --- src/prompts.py ---
+
+VERIFY_PROMPT_AR = (
+    "تحقق من الادعاءات التالية اعتمادًا على المقتطفات فقط. "
+    "أعد JSON فقط (بدون أي نص إضافي) بالهيئة: "
+    "[{id, verdict: valid|invalid, explanation≤200 chars}]."
+)
+
+VERIFY_PROMPT_EN = (
+    "Verify the claims strictly using the provided excerpts only. "
+    "Return JSON only (no extra text) as: "
+    "[{id, verdict: valid|invalid, explanation≤200 chars}]."
+)
+
+
+ملاحظة: لو عندك مكان بيستخدم البرومبت ده مباشرة، سبّه؛ بس دلوقتي بقى عندنا response_schema بيجبر النموذج يلتزم بالـ JSON القصير.
+
+4) استخدام الموديلات الخفيفة عند الحاجة
+
+في batch_verify فوق، ضفت failover تلقائي لـ gemini-2.5-flash-lite لو ظهر “internal error”.
+
+ده خاص بالـ verification فقط، مش الـ generation الكبيرة.
+
+ليه ده بيحل المشكلة نهائيًا؟
+
+Structured Output بـ response_mime_type + response_schema يمنع أي رغي خارج JSON.
+
+شرح ≤ 200 حرف × ٥ عناصر ≈ مئات التوكنز فقط، بعيد جدًا عن 2000.
+
+تقسيم الدُفعات يضمن إن حتى لو في حالات متطرفة، عمرك ما تعدّي الـ limit.
+
+استخراج آمن للنص يمنع خطأ “No text attribute” لما finish_reason مش STOP.
+
+Failover يقلل أثر أخطاء 500 الداخلية.
+
+لو طبّقت السطور دي زي ما هي، رسالة “Response truncated due to MAX_TOKENS” تختفي إن شاء الله، والـ verifier هيطلع JSON صغير مظبوط كل مرة.
