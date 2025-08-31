@@ -7,3 +7,5 @@ knowledge_base
 parse_utils
 prompts
 reference_verifier
+strict_generator
+strict_prompts

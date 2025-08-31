@@ -9,6 +9,8 @@ src/knowledge_base.py
 src/parse_utils.py
 src/prompts.py
 src/reference_verifier.py
+src/strict_generator.py
+src/strict_prompts.py
 src/repl_nix_workspace.egg-info/PKG-INFO
 src/repl_nix_workspace.egg-info/SOURCES.txt
 src/repl_nix_workspace.egg-info/dependency_links.txt

@@ -1,0 +1,295 @@
+جميل — تمام. هقولّك بيانياً وبأمثلة عملية إزاي تستفيد من الملفات اللي عندكم (arabic_chunks.json, arabic_cleaned.txt, arabic_qa_pairs (2000).json, ونفسهم للإنجليزي) علشان تبنوا pipeline صارم local-first يقلّل نداءات Gemini ويمنع الاختلاق.
+
+أقسم الرد لـ: 1) مخطط عام، 2) خطوات عملية (كود جاهز تقدر تلصقه)، 3) برومبت صارم (عربي وإنجليزي) تستخدامه مع Gemini للحالات الغامضة، 4) schema مخرجات ونصائح إعدادات الـ API، 5) مقاييس ومتابعة.
+
+1) المخطط العام (one-line)
+
+اقرأ الملفات → ابني فهرس نصي (inverted index + offsets) → استخدم قواعد Local Verification (exact → overlap → paraphrase) → جمع الحالات الغامضة على دفعات وابعثها للموديل مع برومبت صارم → احفظ النتيجة في JSONL مع fields موثوقة.
+
+2) خطوات عملية + قطع كود (Python)
+
+ملاحظة: الكود أدناه يعتمد فقط على ملفات نصية/JSON الموجودة عندكم (لا PDF/Word). افحص المسارات وعدّل حسب بنية المشروع.
+
+2.1 قراءة الملفات وبناء نص موحّد + index (find positions)
+# src/local_index.py
+import json
+import re
+from collections import defaultdict
+from typing import List, Tuple
+
+def load_chunks(path: str) -> List[dict]:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def build_index(chunks: List[dict]) -> Tuple[str, List[dict], dict]:
+    """
+    returns: full_text, chunks (with start,end filled), inverted_index {token -> [(chunk_id, pos_in_chunk), ...]}
+    """
+    full_text = []
+    inverted = defaultdict(list)
+    for c in chunks:
+        text = c.get("text") or c.get("content") or c.get("chunk_text") or c.get("excerpt", "")
+        # normalize spaces
+        text = re.sub(r'\s+', ' ', text).strip()
+        c["text"] = text
+        # build token list
+        tokens = text.split()
+        for i, t in enumerate(tokens):
+            inverted[t].append((c["id"], i))
+        full_text.append(text)
+    return " ".join(full_text), chunks, inverted
+
+# usage:
+# chunks = load_chunks("inputs/arabic_chunks.json")
+# full, chunks, idx = build_index(chunks)
+
+2.2 دالة إيجاد substring مع start_char/end_char داخل chunk
+# src/find_evidence.py
+import re
+
+def find_exact_in_chunk(reference: str, chunk_text: str) -> Tuple[int,int]:
+    """
+    returns start,end (char offsets) in chunk_text if exact match exists, else (-1,-1)
+    """
+    if not reference or not chunk_text:
+        return -1, -1
+    # Try direct exact substring
+    idx = chunk_text.find(reference)
+    if idx != -1:
+        return idx, idx + len(reference)
+    # fallback: normalize whitespace and punctuation and try to align
+    def norm(s):
+        s2 = re.sub(r'\s+', ' ', s).strip()
+        return s2
+    nref = norm(reference)
+    nchunk = norm(chunk_text)
+    pos = nchunk.find(nref)
+    if pos == -1:
+        return -1, -1
+    # we need to map normalized pos back to original chunk text — approximate by searching the first token
+    first_token = nref.split()[0]
+    m = re.search(re.escape(first_token), chunk_text)
+    if not m:
+        return -1, -1
+    # best-effort: return where we found that token (coarse)
+    start = m.start()
+    end = start + len(nref)
+    return start, end
+
+2.3 حساب تشابه التوكنز (overlap) — نسخة مبسطة
+# src/overlap.py
+import re
+def normalize_for_overlap(s: str) -> str:
+    s = re.sub(r'[^\w\s]', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s.lower()
+
+def token_overlap_rate(ref: str, chunk: str) -> float:
+    rset = set(normalize_for_overlap(ref).split())
+    cset = set(normalize_for_overlap(chunk).split())
+    if not rset:
+        return 0.0
+    return len(rset & cset) / len(rset)
+
+2.4 local verification logic (exact → overlap thresholds → label)
+# src/verify_local.py
+from find_evidence import find_exact_in_chunk
+from overlap import token_overlap_rate
+
+# thresholds (tuneable)
+EXACT_THRESHOLD = 1.0  # exact match
+HIGH_OVERLAP = 0.85    # mark True if overlap >= 0.85
+PARAPHRASE_OVERLAP = 0.72  # possible paraphrase -> needs model/manual review
+
+def verify_claim_locally(claim: str, chunk: dict) -> dict:
+    """
+    returns a dict with verdict, evidence (file/chunk id + offsets), method, overlap
+    """
+    chunk_text = chunk["text"]
+    s,e = find_exact_in_chunk(claim, chunk_text)
+    if s != -1:
+        return {
+            "verdict": "True",
+            "method": "exact",
+            "evidence": {"chunk_id": chunk["id"], "start_char": s, "end_char": e},
+            "overlap": 1.0
+        }
+    overlap = token_overlap_rate(claim, chunk_text)
+    if overlap >= HIGH_OVERLAP:
+        return {
+            "verdict": "True",
+            "method": "high_overlap",
+            "evidence": {"chunk_id": chunk["id"]},
+            "overlap": overlap
+        }
+    if overlap >= PARAPHRASE_OVERLAP:
+        return {
+            "verdict": "Ambiguous",
+            "method": "paraphrase",
+            "evidence": {"chunk_id": chunk["id"]},
+            "overlap": overlap
+        }
+    return {
+        "verdict": "Unknown",
+        "method": "no_match",
+        "evidence": None,
+        "overlap": overlap
+    }
+
+2.5 جمع الحالات الغامضة وتهيئة دفعات للموديل (batch ambiguous)
+# src/batch_ambiguous.py
+import json
+
+BATCH_SIZE = 20
+
+def collect_ambiguous(candidates: List[dict]) -> List[List[dict]]:
+    amb = [c for c in candidates if c["local_verdict"] in ("Ambiguous","Unknown")]
+    batches = [amb[i:i+BATCH_SIZE] for i in range(0, len(amb), BATCH_SIZE)]
+    return batches
+
+def prepare_model_payload(batch: List[dict], language: str) -> dict:
+    """
+    Create a prompt payload that instructs the model to verify only using attached_assets.
+    """
+    # We'll attach the short metadata and the relevant chunk excerpts (already available locally).
+    examples_json = []
+    for c in batch:
+        examples_json.append({
+            "id": c["id"],
+            "claim": c["claim"],
+            "context_excerpt": c["context_excerpt"][:2500]  # truncate safely
+        })
+    return {
+        "language": language,
+        "batch": examples_json
+    }
+
+3) برومبت صارم (copy/paste) — يجب أن يتضمن توجيه صريح لاستخدام attached_assets فقط
+Arabic strict prompt (نص تام ترسله في body قبل الـ instances)
+You are a deterministic verifier. You MUST use only the content provided in the "attached_assets" folder (local repository). Do NOT invent facts, do NOT hallucinate sources, and do NOT use outside knowledge.
+
+Input: a JSON array of items. Each item: { "id", "claim", "context_excerpt" } — the context_excerpt is from the attached_assets.
+
+Task: For each item return a JSON object with exactly these fields:
+- id (same)
+- verdict: one of ["True","False","Unknown"]
+- explanation: short Arabic explanation, max 60 words, concise and factual.
+- evidence: either null or an object { "file_path": "<relative path in attached_assets>", "chunk_id": "<id>", "start_char": int, "end_char": int }
+- confidence: float between 0.0 and 1.0
+- suspected_fabrication: boolean
+
+Rules:
+1) If you cannot demonstrably find supporting or contradicting text inside attached_assets, set verdict="Unknown", suspected_fabrication=true, evidence=null.
+2) Only use text exactly present in attached_assets for evidence; evidence.start_char/end_char must point to the exact substring in the referenced file.
+3) Output ONLY a JSON array — no extra commentary, no markdown.
+4) Be deterministic: temperature=0, top_p=1.0.
+5) Keep each explanation <= 60 words.
+
+Return: a JSON array of objects as specified.
+
+
+(نسخة إنجليزية نفسها تضع "use only attached_assets" و"output only JSON array")
+
+4) مخطط مخرجات (JSON schema) — استخدمه للتحقق تلقائيًا
+{
+  "type": "object",
+  "properties": {
+    "id": {"type":"string"},
+    "verdict": {"enum":["True","False","Unknown"]},
+    "explanation": {"type":"string"},
+    "evidence": {
+      "oneOf": [
+         {"type":"null"},
+         {
+           "type":"object",
+           "properties":{
+             "file_path":{"type":"string"},
+             "chunk_id":{"type":"string"},
+             "start_char":{"type":"integer"},
+             "end_char":{"type":"integer"}
+           },
+           "required":["file_path","chunk_id","start_char","end_char"],
+           "additionalProperties": false
+         }
+      ]
+    },
+    "confidence": {"type":"number", "minimum":0.0, "maximum":1.0},
+    "suspected_fabrication": {"type":"boolean"}
+  },
+  "required": ["id","verdict","explanation","evidence","confidence","suspected_fabrication"],
+  "additionalProperties": false
+}
+
+5) إعدادات Gemini (توجيهات عملية)
+
+عند استدعاء الموديل للحالات الغامضة:
+
+model: use gemini-2.5-flash or gemini-2.5-pro only for ambiguous batches; prefer flash for cost.
+
+temperature: 0
+
+max_output_tokens: 2000 (verification JSON should be small)
+
+top_p: 1.0
+
+stop: none (but rely on JSON-only prompt)
+
+Always do: check response.parts exists before response.text. إذا parts مفقودة سجّل الحالة ورجع retry/backoff.
+
+6) عملية التشغيل (pipeline commands)
+
+Build index:
+
+python -m src.local_index  inputs/arabic_chunks.json  # produce index files: data/index_ar.json
+
+
+Run local verification over seeds/qa:
+
+python -m src.run_local_verification --chunks inputs/arabic_chunks.json --seeds inputs/arabic_qa_pairs\ \(2000\).json --out data/local_ver_ar.jsonl
+
+
+Aggregate ambiguous and batch:
+
+python -m src.collect_ambiguous --in data/local_ver_ar.jsonl --batch_size 20 --out data/batches_ar/
+
+
+Send each batch to model (only ambiguous):
+
+python -m src.verify_with_model --batch data/batches_ar/batch_0.json --model gemini-2.5-flash --prompt src/strict_prompt_ar.txt --out data/model_ver_ar_batch_0.jsonl
+
+
+Merge results, validate against schema, compute fabrication rate:
+
+python -m src.merge_and_validate --local data/local_ver_ar.jsonl --model_results data/model_ver_ar_*.jsonl --schema src/schema.json --out data/final_ar.jsonl
+
+7) مقاييس ومراقبة
+
+احفظ ملف summary بعد كل run: generated_count, local_verified, model_verified, fabrication_rate.
+
+Fail the pipeline (CI) if fabrication_rate > 0.10.
+
+Log truncated responses, finish_reason, and any no_parts to raw/ folder.
+
+8) نصائح حل مشاكل اللي ظهروا عندك في اللوجز
+
+finish_reason=2 و“No text attribute”: قبل الوصول لـ response.text افحص if response.parts and len(response.parts)>0 وإلا سجل الـ response raw. اعمل retry/backoff.
+
+Response truncated due to MAX_TOKENS: للتأكد قلّل max_output_tokens للـ verification إلى 2000 — لكن لو النموذج يحتاج آيات أطول لإعطاء evidence، بدّل strategy: لا تطلب من الموديل توليد اقتباس نصي طويل — بل أطلب منه إرجاع فقط chunk_id وstart_char/end_char (صغير الحجم).
+
+High fabrication rate: ارفع حسّاسيات الفحص المحلي (مثلاً overlap threshold) أو زوّد سياسة escalation للمراجعة اليدوية بدلاً من السماح للموديل بالقرارات الحرة.
+
+9) هل الداتا الحالية كويسة؟
+
+نعم: وجود arabic_chunks.json وملفات cleaned و QA pairs ممتاز لأنك قادر تعمل local-first.
+
+نقاط تحتاج تأكيد/تحسين:
+
+تأكد أن في كل chunk عندك حقل نص كامل (مثل "text"). بدون نص كامل مستحيل تحسب offsets.
+
+إذا context_excerpt في seeds أكبر من حكمك على الحد (CONTEXT_MAX_CHARS)، سواها (truncate مع حفظ original).
+
+أضف في كل chunk: id, file_path (مثلاً inputs/arabic_chunks.json + index) حتى الـ evidence تحمل file_path صحيحة.
+
+10) عملت لك مثال برومبت عربي + إنجليزي فوق — ضيف في البرومبت:
+
+"Use the files in attached_assets/ (arabic_chunks.json, english_chunks.json, arabic_cleaned.txt, english_cleaned.txt). You MUST reference file_path exactly as in attached_assets."
