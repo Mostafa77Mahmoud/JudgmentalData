@@ -47,8 +47,10 @@ def initialize_system():
         if keys_file.exists():
             with open(keys_file, 'r', encoding='utf-8') as f:
                 keys_data = json.load(f)
-                # Assuming keys are stored in a list or dictionary, adapt as needed
-                if isinstance(keys_data, list):
+                # Extract keys from the "keys" array in the config structure
+                if isinstance(keys_data, dict) and "keys" in keys_data:
+                    api_keys.extend(keys_data["keys"])
+                elif isinstance(keys_data, list):
                     api_keys.extend(keys_data)
                 elif isinstance(keys_data, dict):
                     api_keys.extend(keys_data.values())
@@ -73,8 +75,8 @@ def initialize_system():
         # Initialize components
         st.session_state.processor = DataProcessor()
         st.session_state.knowledge_base = AAOIFIKnowledgeBase()
-        # Pass the list of valid API keys to DatasetGenerator
-        st.session_state.generator = DatasetGenerator(valid_keys)
+        # Pass the config file path to DatasetGenerator
+        st.session_state.generator = DatasetGenerator("config/keys.json")
 
         # Load data
         st.session_state.processor.load_data()
@@ -182,9 +184,8 @@ def dataset_generation_page():
             with st.spinner("Running smoke test..."):
                 try:
                     results = st.session_state.generator.run_smoke_test(
-                        language=smoke_language,
-                        batch_size=3,  # Optimal batch size to prevent token overflow
-                        smoke_total=smoke_target
+                        language=smoke_language.lower(),
+                        target_count=smoke_target
                     )
 
                     if results['success']:
@@ -288,7 +289,10 @@ def system_status_page():
         try:
             with open(keys_file, 'r', encoding='utf-8') as f:
                 keys_data = json.load(f)
-                if isinstance(keys_data, list):
+                # Extract keys from the "keys" array in the config structure
+                if isinstance(keys_data, dict) and "keys" in keys_data:
+                    keys_from_config.extend(keys_data["keys"])
+                elif isinstance(keys_data, list):
                     keys_from_config.extend(keys_data)
                 elif isinstance(keys_data, dict):
                     keys_from_config.extend(keys_data.values())
