@@ -11,7 +11,7 @@ from pathlib import Path
 import logging
 
 from src.gemini_client import GeminiClient, batch_verify, robust_parse_json_array, batch_verify_single
-from src.gemini_config import BATCH_SIZE, CONTEXT_MAX_CHARS, MAX_FABRICATION_RATE
+from src.gemini_config import BATCH_SIZE, CONTEXT_MAX_CHARS, MAX_FABRICATION_RATE, MAX_OUTPUT_TOKENS, MAX_INPUT_TOKENS
 from src.parse_utils import parse_json_loose, compute_token_overlap, validate_example_schema, find_exact_substring
 from src.data_processor import DataProcessor
 

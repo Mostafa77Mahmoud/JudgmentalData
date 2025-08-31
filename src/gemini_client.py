@@ -111,6 +111,20 @@ def backoff_with_jitter(attempt: int) -> float:
     return max(0.1, base + jitter)
 
 
+def validate_token_limits(prompt: str, max_output_tokens: int) -> Tuple[bool, str]:
+    """Validate that prompt and expected output are within token limits"""
+    # Rough estimation: 1 token ≈ 3-4 characters for mixed languages
+    estimated_input_tokens = len(prompt) // 3
+    
+    if estimated_input_tokens > MAX_INPUT_TOKENS:
+        return False, f"Input tokens ({estimated_input_tokens}) exceed limit ({MAX_INPUT_TOKENS})"
+    
+    if max_output_tokens > MAX_OUTPUT_TOKENS:
+        return False, f"Output tokens ({max_output_tokens}) exceed limit ({MAX_OUTPUT_TOKENS})"
+    
+    return True, "OK"
+
+
 def extract_text(response):
     """Extract text from response candidates properly"""
     if not response.candidates:
@@ -138,12 +152,17 @@ def send_verify_request(model_name: str, api_key: str, prompt_text: str,
                         max_tokens: int, attempt: int) -> str:
     """Send verification request using Google Generative AI SDK"""
     try:
+        # Validate token limits before making request
+        is_valid, validation_msg = validate_token_limits(prompt_text, max_tokens)
+        if not is_valid:
+            raise ValueError(f"Token validation failed: {validation_msg}")
+        
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name)
 
         generation_config = genai.GenerationConfig(
             temperature=VERIFIER_TEMPERATURE,
-            max_output_tokens=max_tokens,
+            max_output_tokens=min(max_tokens, MAX_OUTPUT_TOKENS),
             response_mime_type="application/json")
 
         response = model.generate_content(prompt_text,
@@ -378,9 +397,10 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
     language = items[0].get("language", "en") if items else "en"
     est_tokens_per_item = 800 if language == "ar" else 400  # Arabic needs more tokens
 
-    # Use smaller max tokens to avoid truncation
-    max_tokens = min(MAX_OUTPUT_TOKENS,
-                     est_tokens_per_item * max(1, len(items)))
+    # Use smaller max tokens to avoid truncation - cap at reasonable limit for verification
+    max_tokens = min(MAX_OUTPUT_TOKENS, 
+                     est_tokens_per_item * max(1, len(items)),
+                     10000)  # Cap at 10k for verification responses
     
     # Ensure we don't exceed input token limits
     estimated_input_tokens = len(json.dumps(items, ensure_ascii=False)) // 3  # Rough estimate
@@ -558,13 +578,26 @@ class GeminiClient:
                 generation_config = genai.GenerationConfig(
                     temperature=temperature,
                     max_output_tokens=max_tokens,
-                    response_mime_type="application/json",
+                    response_mime_type="application/json"
                 )
+
+                # Check input token estimate
+                estimated_input_tokens = len(prompt) // 3  # Rough estimate
+                if estimated_input_tokens > MAX_INPUT_TOKENS:
+                    logger.warning(f"Input tokens ({estimated_input_tokens}) may exceed limit ({MAX_INPUT_TOKENS})")
 
                 start_time = time.time()
                 response = model_instance.generate_content(
                     prompt, generation_config=generation_config)
                 latency = time.time() - start_time
+
+                # Check if response was truncated
+                if hasattr(response, 'candidates') and response.candidates:
+                    candidate = response.candidates[0]
+                    if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
+                        finish_reason_name = candidate.finish_reason.name if hasattr(candidate.finish_reason, 'name') else str(candidate.finish_reason)
+                        if finish_reason_name == "MAX_TOKENS":
+                            logger.warning(f"Response truncated due to MAX_TOKENS limit. Consider reducing prompt or increasing max_output_tokens.")
 
                 # Update key state
                 with self.lock:
