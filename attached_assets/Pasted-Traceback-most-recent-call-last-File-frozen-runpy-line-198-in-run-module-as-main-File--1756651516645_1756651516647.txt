@@ -1,0 +1,28 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/runner/workspace/src/dataset_generator.py", line 13, in <module>
+    from src.gemini_client import GeminiClient, batch_verify, robust_parse_json_array, batch_verify_single
+  File "/home/runner/workspace/src/gemini_client.py", line 10, in <module>
+    import google.generativeai as genai
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/google/generativeai/__init__.py", line 45, in <module>
+    from google.generativeai import caching
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/google/generativeai/caching.py", line 21, in <module>
+    from google.generativeai import protos
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/google/generativeai/protos.py", line 74, in <module>
+    from google.ai.generativelanguage_v1beta.types import *
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/google/ai/generativelanguage_v1beta/__init__.py", line 21, in <module>
+    from .services.cache_service import CacheServiceAsyncClient, CacheServiceClient
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/google/ai/generativelanguage_v1beta/services/cache_service/__init__.py", line 16, in <module>
+    from .async_client import CacheServiceAsyncClient
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/google/ai/generativelanguage_v1beta/services/cache_service/async_client.py", line 33, in <module>
+    from google.api_core import gapic_v1
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/google/api_core/gapic_v1/__init__.py", line 16, in <module>
+    from google.api_core.gapic_v1 import config
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/google/api_core/gapic_v1/config.py", line 23, in <module>
+    import grpc
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/grpc/__init__.py", line 22, in <module>
+    from grpc import _compression
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/grpc/_compression.py", line 20, in <module>
+    from grpc._cython import cygrpc
+ImportError: cannot import name 'cygrpc' from 'grpc._cython' (/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/grpc/_cython/__init__.py)
