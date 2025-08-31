@@ -92,3 +92,87 @@ def get_strict_prompt(language: str, batch_size: int, n_true: int, n_false: int,
             N_FALSE=n_false,
             N_UNKNOWN=n_unknown
         )
+def get_strict_arabic_prompt() -> str:
+    """Strict Arabic verification prompt"""
+    return """أنت نظام تحقق صارم. يجب أن تستخدم فقط المحتوى المقدم في مجلد "attached_assets" (المستودع المحلي). لا تخترع حقائق، لا تهلوس مصادر، ولا تستخدم معرفة خارجية.
+
+المدخل: مصفوفة JSON من العناصر. كل عنصر: { "id", "claim", "context_excerpt" } — context_excerpt من attached_assets.
+
+المهمة: لكل عنصر أرجع كائن JSON بهذه الحقول بالضبط:
+- id (نفسه)
+- verdict: واحد من ["True","False","Unknown"]
+- explanation: شرح عربي قصير، حد أقصى 60 كلمة، موجز وواقعي
+- evidence: إما null أو كائن { "file_path": "<مسار نسبي في attached_assets>", "chunk_id": "<id>", "start_char": int, "end_char": int }
+- confidence: رقم عشري بين 0.0 و 1.0
+- suspected_fabrication: منطقي
+
+القواعد:
+1) إذا لم تستطع إثبات وجود نص داعم أو معارض داخل attached_assets، ضع verdict="Unknown", suspected_fabrication=true, evidence=null
+2) استخدم فقط النص الموجود بالضبط في attached_assets للأدلة؛ evidence.start_char/end_char يجب أن يشير للنص الفرعي الدقيق في الملف المرجعي
+3) أخرج فقط مصفوفة JSON — بدون تعليقات إضافية، بدون markdown
+4) كن حتمياً: temperature=0, top_p=1.0
+5) اجعل كل explanation ≤ 60 كلمة
+
+أرجع: مصفوفة JSON من الكائنات كما هو محدد.
+
+استخدم الملفات في attached_assets/ (arabic_chunks.json, english_chunks.json, arabic_cleaned.txt, english_cleaned.txt). يجب أن تُرجع file_path بالضبط كما هو في attached_assets."""
+
+def get_strict_english_prompt() -> str:
+    """Strict English verification prompt"""
+    return """You are a deterministic verifier. You MUST use only the content provided in the "attached_assets" folder (local repository). Do NOT invent facts, do NOT hallucinate sources, and do NOT use outside knowledge.
+
+Input: a JSON array of items. Each item: { "id", "claim", "context_excerpt" } — the context_excerpt is from the attached_assets.
+
+Task: For each item return a JSON object with exactly these fields:
+- id (same)
+- verdict: one of ["True","False","Unknown"]
+- explanation: short English explanation, max 60 words, concise and factual
+- evidence: either null or an object { "file_path": "<relative path in attached_assets>", "chunk_id": "<id>", "start_char": int, "end_char": int }
+- confidence: float between 0.0 and 1.0
+- suspected_fabrication: boolean
+
+Rules:
+1) If you cannot demonstrably find supporting or contradicting text inside attached_assets, set verdict="Unknown", suspected_fabrication=true, evidence=null
+2) Only use text exactly present in attached_assets for evidence; evidence.start_char/end_char must point to the exact substring in the referenced file
+3) Output ONLY a JSON array — no extra commentary, no markdown
+4) Be deterministic: temperature=0, top_p=1.0
+5) Keep each explanation <= 60 words
+
+Return: a JSON array of objects as specified.
+
+Use the files in attached_assets/ (arabic_chunks.json, english_chunks.json, arabic_cleaned.txt, english_cleaned.txt). You MUST reference file_path exactly as in attached_assets."""
+
+def get_verification_schema() -> dict:
+    """JSON schema for verification output"""
+    return {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "verdict": {"enum": ["True", "False", "Unknown"]},
+                "explanation": {"type": "string"},
+                "evidence": {
+                    "oneOf": [
+                        {"type": "null"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "file_path": {"type": "string"},
+                                "chunk_id": {"type": "string"},
+                                "start_char": {"type": "integer"},
+                                "end_char": {"type": "integer"},
+                                "match_type": {"enum": ["exact", "partial", "paraphrase", "inferred"]}
+                            },
+                            "required": ["file_path", "chunk_id", "start_char", "end_char"],
+                            "additionalProperties": False
+                        }
+                    ]
+                },
+                "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "suspected_fabrication": {"type": "boolean"}
+            },
+            "required": ["id", "verdict", "explanation", "evidence", "confidence", "suspected_fabrication"],
+            "additionalProperties": False
+        }
+    }

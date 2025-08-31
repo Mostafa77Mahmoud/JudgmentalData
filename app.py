@@ -211,12 +211,18 @@ def dataset_generation_page():
         st.markdown("Generate the complete dataset after smoke test passes")
 
         target_count = st.number_input("Target examples per language", min_value=100, max_value=5000, value=2000)
+        
+        # Add strict mode toggle
+        st.subheader("Generation Mode")
+        use_strict_mode = st.checkbox("Use Strict Local-First Mode", 
+                                    value=True, 
+                                    help="Reduces API calls and prevents hallucination by using local verification first")
 
         if st.button("Generate Full Dataset"):
             # Check if smoke test output exists
             ar_files = list(Path("data/generation_stage_B/ar").glob("smoke_test_ar_*.jsonl"))
             en_files = list(Path("data/generation_stage_B/en").glob("smoke_test_en_*.jsonl"))
-            
+
             if not ar_files and not en_files:
                 st.warning("Please run and pass the smoke test first.")
                 return
@@ -228,14 +234,14 @@ def dataset_generation_page():
 
                     # Arabic generation
                     status_text.text("Generating Arabic dataset...")
-                    ar_results = st.session_state.generator.generate_full_dataset("ar", target_count, progress_bar)
+                    ar_results = st.session_state.generator.generate_full_dataset("ar", target_count, progress_bar, strict_mode=use_strict_mode)
 
                     if ar_results['success']:
                         progress_bar.progress(0.5)
                         status_text.text("Generating English dataset...")
 
                         # English generation
-                        en_results = st.session_state.generator.generate_full_dataset("en", target_count, progress_bar)
+                        en_results = st.session_state.generator.generate_full_dataset("en", target_count, progress_bar, strict_mode=use_strict_mode)
 
                         if en_results['success']:
                             progress_bar.progress(1.0)
@@ -287,6 +293,12 @@ def system_status_page():
 
     # API Keys status
     st.subheader("API Keys Status")
+    # Add strict mode toggle
+    st.subheader("Generation Mode")
+    use_strict_mode = st.checkbox("Use Strict Local-First Mode", 
+                                value=True, 
+                                help="Reduces API calls and prevents hallucination by using local verification first")
+
     # Check keys from config file first, then environment variables
     keys_from_config = []
     keys_file = Path("config/keys.json")
