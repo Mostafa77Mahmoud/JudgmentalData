@@ -1,26 +1,210 @@
 
-import os
+# src/gemini_client.py
 import time
+import random
 import json
 import logging
+import os
+import re
 import threading
-from typing import Dict, List, Optional, Tuple
+from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
+from src.gemini_config import API_KEYS, MODELS, BATCH_SIZE, MAX_RETRIES, INITIAL_BACKOFF, MAX_BACKOFF, CONTEXT_MAX_CHARS, VERIFIER_MODEL, VERIFIER_TEMPERATURE
 
+logger = logging.getLogger(__name__)
+Path("raw").mkdir(parents=True, exist_ok=True)
+
+def rotate_key(attempt_index: int) -> str:
+    return API_KEYS[attempt_index % len(API_KEYS)]
+
+def exponential_backoff_sleep(attempt: int):
+    base = INITIAL_BACKOFF * (2 ** (attempt - 1))
+    jitter = random.uniform(0, base * 0.1)
+    sleep_for = min(base + jitter, MAX_BACKOFF)
+    logger.info("backoff sleep: %.2fs (attempt %d)", sleep_for, attempt)
+    time.sleep(sleep_for)
+
+def send_verify_request(model_name: str, api_key: str, prompt_text: str, max_tokens: int, attempt: int) -> str:
+    """
+    Send verification request using Google Generative AI SDK
+    """
+    genai.configure(api_key=api_key)
+    
+    generation_config = {
+        "temperature": VERIFIER_TEMPERATURE,
+        "max_output_tokens": max_tokens,
+    }
+    
+    model_instance = genai.GenerativeModel(
+        model_name=model_name,
+        generation_config=generation_config
+    )
+    
+    response = model_instance.generate_content(prompt_text)
+    return response.text if response.text else ""
+
+def find_json_bounds(text: str):
+    """Find first balanced JSON array or object in text and return substring, or None."""
+    if not text:
+        return None
+    # search for opening bracket
+    starts = [(m.start(), m.group()) for m in re.finditer(r'[\[\{]', text)]
+    for start_index, start_char in starts:
+        stack = []
+        for i, ch in enumerate(text[start_index:], start_index):
+            if ch in ('[', '{'):
+                stack.append(ch)
+            elif ch in (']', '}'):
+                if not stack:
+                    break
+                opening = stack.pop()
+                # allow mismatch but continue
+            if not stack:
+                return text[start_index:i+1]
+    return None
+
+def robust_parse_json_array(text: str):
+    """Try several heuristics to parse model response into a JSON list of objects."""
+    if not text:
+        return None
+    # remove code fences and common wrapper text
+    text = re.sub(r"^```(?:json)?\n", "", text.strip())
+    text = re.sub(r"\n```$", "", text)
+    text = text.strip()
+
+    # direct parse
+    try:
+        j = json.loads(text)
+        if isinstance(j, list):
+            return j
+        if isinstance(j, dict):
+            return [j]
+    except Exception:
+        pass
+
+    # find first balanced structure
+    candidate = find_json_bounds(text)
+    if candidate:
+        try:
+            j = json.loads(candidate)
+            if isinstance(j, list):
+                return j
+            if isinstance(j, dict):
+                return [j]
+        except Exception:
+            # try simple repair: if opened '[' but missing ']', add closing brackets
+            if candidate.count('[') > candidate.count(']'):
+                repaired = candidate + (']' * (candidate.count('[') - candidate.count(']')))
+                try:
+                    j = json.loads(repaired)
+                    if isinstance(j, list):
+                        return j
+                    if isinstance(j, dict):
+                        return [j]
+                except Exception:
+                    pass
+    # fallback: regex-extract top-level objects
+    objs = re.findall(r'\{(?:[^{}]|\{[^}]*\})*\}', text, flags=re.DOTALL)
+    parsed = []
+    for o in objs:
+        try:
+            parsed.append(json.loads(o))
+        except Exception:
+            continue
+    if parsed:
+        return parsed
+    return None
+
+# The strict verifier prompt to include in requests (kept as constant)
+VERIFIER_PROMPT = r"""
+System: You are a strict JSON-only verifier. You MUST respond with exactly one JSON array containing one object per input item and NOTHING else (no prose, no backticks, no commentary).
+
+Input: an array `items` where each item has:
+- id: string
+- claim: string
+- context_excerpt: string (already truncated to <=512 chars)
+- language: "ar" or "en"
+- context_chunk_id: integer
+
+Task: For each item decide whether the claim can be VERIFIED from the context excerpt.
+Rules:
+1. If an exact substring of the claim (or a near-literal short quote) exists inside context_excerpt, set verdict to "True", reference to that exact matched substring, explanation to a one-sentence quote-based justification (<=30 words), suspected_fabrication false, confidence 0.90-1.00.
+2. If the context does NOT contain evidence to support the claim, set verdict to "False", reference: "UNKNOWN", explanation: short (<=20 words), suspected_fabrication true or false as appropriate, confidence 0.1-0.5.
+3. Never invent references. If unsure, choose "False" with reference "UNKNOWN".
+4. Use verdict values exactly "True" or "False".
+5. The output JSON array length must match input length and preserve input order. Each object MUST include fields:
+   { "id", "language", "claim", "context_chunk_id", "context_excerpt", "verdict", "explanation", "reference", "suspected_fabrication", "generator_model", "raw_response_path", "meta" }
+6. meta must contain at least {"confidence": <0-1>, "seed_id": "<seed>"}. generator_model must be the model name used.
+
+Return only the JSON array.
+"""
+
+def prepare_verifier_request(items: List[Dict], max_tokens: int):
+    # Build the request text for the Gemini model
+    prompt_text = VERIFIER_PROMPT + "\n\nINPUT_ITEMS_JSON:\n" + json.dumps(items, ensure_ascii=False)
+    return prompt_text
+
+def batch_verify(items: List[Dict]) -> List[Dict]:
+    """
+    items: list dict with id, claim, context_excerpt, language, context_chunk_id
+    returns: parsed verification objects in the same order
+    """
+    assert len(items) <= BATCH_SIZE, f"batch size must be <= {BATCH_SIZE}"
+    # ensure truncation
+    for it in items:
+        it["context_excerpt"] = it.get("context_excerpt","")[:CONTEXT_MAX_CHARS]
+
+    # estimate tokens per item; conservative default
+    est_tokens_per_item = 300
+    max_tokens = min(4000, est_tokens_per_item * max(1, len(items)))
+
+    last_err = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        api_key = rotate_key(attempt - 1)
+        try:
+            prompt_text = prepare_verifier_request(items, max_tokens)
+            resp_text = send_verify_request(VERIFIER_MODEL, api_key, prompt_text, max_tokens, attempt)
+            ts = int(time.time())
+            raw_path = f"raw/{ts}_verify_{attempt}_{VERIFIER_MODEL.replace('/','_')}.resp.txt"
+            with open(raw_path, "w", encoding="utf8") as f:
+                f.write(resp_text)
+            parsed = robust_parse_json_array(resp_text)
+            if parsed is None:
+                raise ValueError("robust_parse_json_array returned None")
+            if not isinstance(parsed, list) or len(parsed) != len(items):
+                # If length mismatch, attempt to wrap single object into array
+                if isinstance(parsed, dict):
+                    parsed = [parsed]
+                else:
+                    raise ValueError(f"Parsed length mismatch: parsed_len={len(parsed) if isinstance(parsed, list) else 'NA'} expected={len(items)}")
+            # annotate raw path and generator_model
+            for p in parsed:
+                p.setdefault("raw_response_path", raw_path)
+                p.setdefault("generator_model", VERIFIER_MODEL)
+            return parsed
+        except Exception as e:
+            last_err = e
+            logger.error("Unexpected error with key index %d, attempt %d: %s", (attempt-1) % len(API_KEYS), attempt, str(e))
+            if attempt < MAX_RETRIES:
+                exponential_backoff_sleep(attempt)
+                continue
+            else:
+                break
+    logger.error("Batch verify failed after %d attempts: %s", MAX_RETRIES, last_err)
+    return [None] * len(items)
+
+# Legacy GeminiClient class for backward compatibility
 class GeminiClient:
-    """Robust Gemini client with key rotation, rate limiting, and error handling"""
+    """Legacy wrapper to maintain compatibility with existing code"""
     
     def __init__(self, config_path: Optional[str] = None):
         self.logger = logging.getLogger(__name__)
         self.lock = threading.Lock()
         
-        # Load API keys from environment or config
-        self.api_keys = self._load_api_keys(config_path)
-        if not self.api_keys:
-            raise ValueError("No valid API keys found")
-            
+        # Use the centralized API keys
+        self.api_keys = API_KEYS
         self.current_key_index = 0
         self.key_states = {i: {"blocked_until": 0, "requests_made": 0, "last_response": None} 
                           for i in range(len(self.api_keys))}
@@ -28,69 +212,8 @@ class GeminiClient:
         # Create raw responses directory
         Path("raw").mkdir(exist_ok=True)
         
-        # Load models from config or use defaults
-        self.models = self._load_models_from_config(config_path)
-        if not self.models:
-            # Default to 2.5 models if no config
-            self.models = [
-                "models/gemini-2.5-pro",
-                "models/gemini-2.5-flash", 
-                "models/gemini-2.5-flash-lite"
-            ]
-        
-    def _load_api_keys(self, config_path: Optional[str]) -> List[str]:
-        """Load API keys from environment variables or config file"""
-        keys = []
-        
-        # Try environment variables first
-        env_keys = [
-            os.getenv("GEMINI_API_KEY"),
-            os.getenv("GEMINI_KEY_1"), 
-            os.getenv("GEMINI_KEY_2"),
-            os.getenv("GEMINI_KEY_3"),
-            os.getenv("GEMINI_KEY_4")
-        ]
-        
-        # Add hardcoded keys as fallback
-        fallback_keys = [
-            "AIzaSyAspAo_UHjOCKxbmtaPCtldZ7g6XowHoV4",
-            "AIzaSyCLfpievRZO_J_Ryme_1-1T4SjVBOPCfjI", 
-            "AIzaSyAIPk1An1O6sZiro64Q4R9PjVrqvPkSVvQ",
-            "AIzaSyBbidR_bEfiMrhOufE4PAHrYEBvuPuqakg"
-        ]
-        
-        all_keys = env_keys + fallback_keys
-        keys = [key for key in all_keys if key and key.strip()]
-        
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_keys = []
-        for key in keys:
-            if key not in seen:
-                seen.add(key)
-                unique_keys.append(key)
-                
-        self.logger.info(f"Loaded {len(unique_keys)} unique API keys")
-        return unique_keys
-
-    def _load_models_from_config(self, config_path: Optional[str]) -> List[str]:
-        """Load model list from config file"""
-        if not config_path or not Path(config_path).exists():
-            return []
-            
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config_data = json.load(f)
-                
-            models = config_data.get("models", [])
-            if models:
-                self.logger.info(f"Loaded {len(models)} models from config: {models}")
-                return models
-                
-        except Exception as e:
-            self.logger.warning(f"Failed to load models from config: {e}")
-            
-        return []
+        # Use centralized models
+        self.models = MODELS
         
     def _get_next_available_key(self) -> Tuple[Optional[str], int]:
         """Get next available API key, rotating if current is blocked"""
@@ -184,9 +307,6 @@ class GeminiClient:
                     self.key_states[key_index]["requests_made"] += 1
                     self.key_states[key_index]["last_response"] = time.time()
                 
-                # Log metadata
-                self._log_metadata(key_index, model, attempt + 1, latency, "200", prompt[:100])
-                
                 response_text = response.text if response.text else ""
                 raw_path = self._save_raw_response(prompt, response_text, model, key_index)
                 
@@ -217,22 +337,3 @@ class GeminiClient:
                 continue
                 
         return {"success": False, "error": "Max attempts exceeded", "raw_text": ""}
-        
-    def _log_metadata(self, key_index: int, model: str, attempt: int, 
-                     latency: float, status: str, prompt_preview: str):
-        """Log request metadata"""
-        metadata = {
-            "timestamp": time.time(),
-            "key_index": key_index,
-            "model": model,
-            "attempt": attempt,
-            "latency": latency,
-            "status": status,
-            "prompt_preview": prompt_preview
-        }
-        
-        try:
-            with open("logs/metadata.jsonl", "a", encoding="utf-8") as f:
-                f.write(json.dumps(metadata) + "\n")
-        except Exception as e:
-            self.logger.error(f"Failed to log metadata: {e}")

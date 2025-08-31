@@ -9,7 +9,8 @@ from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 import logging
 
-from src.gemini_client import GeminiClient
+from src.gemini_client import GeminiClient, batch_verify, robust_parse_json_array
+from src.gemini_config import BATCH_SIZE, CONTEXT_MAX_CHARS
 from src.parse_utils import parse_json_loose, compute_token_overlap, validate_example_schema, find_exact_substring
 from src.data_processor import DataProcessor
 
@@ -211,45 +212,28 @@ class DatasetGenerator:
         for candidate in candidates:
             chunk_id = candidate.get("context_chunk_id", 0)
             claim = candidate.get("claim", "")
+            item_id = candidate.get("id", "")
+            seed_id = candidate.get("meta", {}).get("seed_id", "")
 
             if chunk_id >= len(chunks):
                 continue
 
             chunk_text = chunks[chunk_id].get("text", "")
 
-            # Check for exact substring match
-            exact_match = find_exact_substring(claim, chunk_text)
-            if exact_match:
-                candidate.update({
-                    "verdict": "True",
-                    "reference": exact_match[:200],  # Limit reference length
-                    "explanation": f"Exact match found: {exact_match[:120]}",
-                    "suspected_fabrication": False,
-                    "meta": {**candidate["meta"], "confidence": 1.0}
-                })
-                verified.append(candidate)
-                continue
-
-            # Check token overlap
-            overlap = compute_token_overlap(claim, chunk_text)
-            if overlap >= 0.75:
-                # Find best matching substring
-                reference_substring = self._find_best_reference_substring(claim, chunk_text)
-                candidate.update({
-                    "verdict": "True",
-                    "reference": reference_substring,
-                    "explanation": f"High overlap match: {reference_substring[:120]}",
-                    "suspected_fabrication": False,
-                    "meta": {**candidate["meta"], "confidence": overlap}
-                })
-                verified.append(candidate)
+            # Try local verification first
+            is_local_verified, local_result = self._local_verify_one(
+                claim, chunk_text, item_id, chunk_id, language, seed_id
+            )
+            
+            if is_local_verified and local_result:
+                verified.append(local_result)
                 continue
 
             # For False candidates created locally, they're already correctly labeled
             if candidate.get("verdict") == "False" and candidate.get("generator_model") == "local":
                 candidate.update({
                     "explanation": "Deterministic false variant",
-                    "meta": {**candidate["meta"], "confidence": 1.0}
+                    "meta": {**candidate.get("meta", {}), "confidence": 1.0}
                 })
                 verified.append(candidate)
                 continue
@@ -278,6 +262,72 @@ class DatasetGenerator:
                     best_match = window
 
         return best_match[:200] if best_match else "UNKNOWN"
+
+    def _local_verify_one(self, claim: str, context: str, item_id: str, chunk_id: int, language: str, seed_id: str = "") -> Tuple[bool, Optional[Dict]]:
+        """Local deterministic verification before sending to model"""
+        if not claim.strip():
+            return False, None
+            
+        # Truncate context to safe limit
+        context = context[:CONTEXT_MAX_CHARS]
+        
+        # Exact substring match (casefold for English, exact for Arabic)
+        if language == "en":
+            if claim.lower() in context.lower():
+                return True, {
+                    "id": item_id,
+                    "language": language,
+                    "claim": claim,
+                    "context_chunk_id": chunk_id,
+                    "context_excerpt": context,
+                    "verdict": "True",
+                    "explanation": "Exact substring match",
+                    "reference": claim,
+                    "suspected_fabrication": False,
+                    "generator_model": "local",
+                    "raw_response_path": "",
+                    "meta": {"confidence": 0.99, "seed_id": seed_id}
+                }
+        else:  # Arabic
+            if claim in context:
+                return True, {
+                    "id": item_id,
+                    "language": language,
+                    "claim": claim,
+                    "context_chunk_id": chunk_id,
+                    "context_excerpt": context,
+                    "verdict": "True",
+                    "explanation": "Exact substring match",
+                    "reference": claim,
+                    "suspected_fabrication": False,
+                    "generator_model": "local",
+                    "raw_response_path": "",
+                    "meta": {"confidence": 0.99, "seed_id": seed_id}
+                }
+        
+        # Token overlap heuristic
+        claim_tokens = set(claim.split())
+        context_tokens = set(context.split())
+        if len(claim_tokens) > 0:
+            overlap = len(claim_tokens & context_tokens) / len(claim_tokens)
+            if overlap >= 0.85:
+                reference = self._find_best_reference_substring(claim, context)
+                return True, {
+                    "id": item_id,
+                    "language": language,
+                    "claim": claim,
+                    "context_chunk_id": chunk_id,
+                    "context_excerpt": context,
+                    "verdict": "True",
+                    "explanation": f"High token overlap ({overlap:.2f})",
+                    "reference": reference,
+                    "suspected_fabrication": False,
+                    "generator_model": "local",
+                    "raw_response_path": "",
+                    "meta": {"confidence": 0.95, "seed_id": seed_id}
+                }
+        
+        return False, None
 
     def _get_batch_verification_prompt(self, candidates: List[Dict], language: str) -> str:
         """Create batch verification prompt for model"""
@@ -318,64 +368,54 @@ Return: EXACTLY a JSON array. No additional text or markdown fences. Temperature
 
         return prompt
 
-    def _batch_verify_with_model(self, candidates: List[Dict], language: str, batch_size: int = 8) -> List[Dict]:
+    def _batch_verify_with_model(self, candidates: List[Dict], language: str, batch_size: int = None) -> List[Dict]:
         """Verify candidates using model in batches"""
+        if batch_size is None:
+            batch_size = BATCH_SIZE
+            
         verified = []
+        chunks = self.processor.arabic_chunks if language == "ar" else self.processor.english_chunks
 
         for i in range(0, len(candidates), batch_size):
             batch = candidates[i:i + batch_size]
-            prompt = self._get_batch_verification_prompt(batch, language)
+            
+            # Prepare items for batch verification
+            items = []
+            for candidate in batch:
+                chunk_id = candidate.get("context_chunk_id", 0)
+                chunk_text = chunks[chunk_id].get("text", "") if chunk_id < len(chunks) else ""
+                
+                items.append({
+                    "id": candidate["id"],
+                    "claim": candidate["claim"],
+                    "context_excerpt": chunk_text[:CONTEXT_MAX_CHARS],
+                    "language": language,
+                    "context_chunk_id": chunk_id
+                })
 
-            # Use Gemini 2.5 Pro for verification
-            result = self.gemini_client.call_model(
-                "models/gemini-2.5-pro",
-                prompt,
-                max_tokens=4096,
-                temperature=0.0
-            )
-
-            if not result["success"]:
-                self.logger.error(f"Batch verification failed: {result.get('error')}")
-                # Mark all as failed
-                for candidate in batch:
-                    candidate.update({
-                        "verdict": "False",
-                        "reference": "UNKNOWN", 
-                        "explanation": "Verification failed",
-                        "suspected_fabrication": True,
-                        "raw_response_path": "",
-                        "meta": {**candidate["meta"], "confidence": 0.0}
-                    })
-                verified.extend(batch)
-                continue
-
-            # Parse verification results
-            verifications = parse_json_loose(result["raw_text"])
-            if not verifications or not isinstance(verifications, list):
-                self.logger.error(f"Failed to parse verification results: {result['raw_text'][:200]}")
-                # Mark all as failed
-                for candidate in batch:
+            # Call batch verification
+            verifications = batch_verify(items)
+            
+            # Apply verification results
+            for j, verification in enumerate(verifications):
+                if j >= len(batch) or verification is None:
+                    # Handle failed verification
+                    candidate = batch[j] if j < len(batch) else batch[-1]
                     candidate.update({
                         "verdict": "False",
                         "reference": "UNKNOWN",
-                        "explanation": "Parse failed", 
+                        "explanation": "Verification failed", 
                         "suspected_fabrication": True,
-                        "raw_response_path": result.get("raw_response_path", ""),
-                        "meta": {**candidate["meta"], "confidence": 0.0}
+                        "raw_response_path": "",
+                        "meta": {**candidate.get("meta", {}), "confidence": 0.0}
                     })
-                verified.extend(batch)
-                continue
-
-            # Apply verification results
-            for j, verification in enumerate(verifications):
-                if j >= len(batch):
-                    break
+                    verified.append(candidate)
+                    continue
 
                 candidate = batch[j]
-                chunks = self.processor.arabic_chunks if language == "ar" else self.processor.english_chunks
-                chunk_text = chunks[candidate["context_chunk_id"]].get("text", "")
-
+                
                 # Validate reference if verdict is True
+                chunk_text = chunks[candidate["context_chunk_id"]].get("text", "") if candidate["context_chunk_id"] < len(chunks) else ""
                 reference = verification.get("reference", "UNKNOWN")
                 if (verification.get("verdict") == "True" and 
                     reference != "UNKNOWN" and
@@ -392,14 +432,13 @@ Return: EXACTLY a JSON array. No additional text or markdown fences. Temperature
                     "explanation": verification.get("explanation", "")[:120],
                     "reference": verification.get("reference", "UNKNOWN"),
                     "suspected_fabrication": verification.get("suspected_fabrication", True),
-                    "raw_response_path": result.get("raw_response_path", ""),
+                    "raw_response_path": verification.get("raw_response_path", ""),
                     "meta": {
-                        **candidate["meta"], 
+                        **candidate.get("meta", {}), 
                         "confidence": verification.get("confidence", 0.0)
                     }
                 })
-
-            verified.extend(batch)
+                verified.append(candidate)
 
             # Rate limiting
             time.sleep(1)

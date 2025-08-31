@@ -82,3 +82,235 @@ def main():
 
 if __name__ == "__main__":
     main()
+#!/usr/bin/env python3
+import argparse
+import json
+import logging
+import time
+import sys
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from src.dataset_generator import DatasetGenerator
+from src.data_processor import DataProcessor
+from src.gemini_client import batch_verify
+from src.gemini_config import CONTEXT_MAX_CHARS
+from src.parse_utils import validate_example_schema
+
+def setup_logging():
+    """Setup logging configuration"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    return logging.getLogger(__name__)
+
+def ensure_chunks_exist(logger) -> bool:
+    """Ensure arabic_chunks.json exists, create from cleaned text if needed"""
+    chunks_file = Path("inputs/arabic_chunks.json")
+    cleaned_file = Path("inputs/arabic_cleaned.txt")
+    
+    if chunks_file.exists():
+        logger.info(f"Using existing chunks file: {chunks_file}")
+        return True
+        
+    if not cleaned_file.exists():
+        logger.error(f"Neither chunks nor cleaned text file exists")
+        return False
+        
+    logger.info(f"Creating chunks from {cleaned_file}")
+    
+    try:
+        with open(cleaned_file, 'r', encoding='utf-8') as f:
+            text = f.read()
+            
+        # Split into logical paragraphs/chunks of ~1000 chars
+        chunks = []
+        chunk_size = 1000
+        
+        # Try to split at sentence boundaries
+        sentences = text.split('.')
+        current_chunk = ""
+        chunk_id = 0
+        
+        for sentence in sentences:
+            if len(current_chunk) + len(sentence) < chunk_size:
+                current_chunk += sentence + "."
+            else:
+                if current_chunk.strip():
+                    chunks.append({
+                        "id": chunk_id,
+                        "text": current_chunk.strip(),
+                        "word_count": len(current_chunk.split()),
+                        "language": "arabic"
+                    })
+                    chunk_id += 1
+                current_chunk = sentence + "."
+        
+        # Add the last chunk
+        if current_chunk.strip():
+            chunks.append({
+                "id": chunk_id,
+                "text": current_chunk.strip(),
+                "word_count": len(current_chunk.split()),
+                "language": "arabic"
+            })
+            
+        # Save chunks
+        with open(chunks_file, 'w', encoding='utf-8') as f:
+            json.dump(chunks, f, ensure_ascii=False, indent=2)
+            
+        logger.info(f"Created {len(chunks)} chunks and saved to {chunks_file}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to create chunks: {e}")
+        return False
+
+def load_seeds(language: str, count: int, logger) -> List[Dict]:
+    """Load QA seeds for generation"""
+    if language == "ar":
+        qa_files = ["inputs/arabic_qa_pairs (2000).json", "inputs/arabic_qa_pairs.json"]
+    else:
+        qa_files = ["inputs/english_qa_pairs (2000).json", "inputs/english_qa_pairs.json"]
+        
+    for qa_file in qa_files:
+        if Path(qa_file).exists():
+            with open(qa_file, 'r', encoding='utf-8') as f:
+                seeds = json.load(f)
+            logger.info(f"Loaded {len(seeds)} seeds from {qa_file}")
+            return seeds[:count]
+    
+    logger.error(f"No QA pairs file found for language {language}")
+    return []
+
+def run_smoke_test(language: str, count: int, logger) -> Dict:
+    """Run smoke test with specified parameters"""
+    logger.info(f"Starting smoke test for {language} with {count} examples")
+    
+    # Ensure chunks exist
+    if not ensure_chunks_exist(logger):
+        return {"success": False, "error": "Failed to load/create chunks"}
+    
+    # Load seeds
+    seeds = load_seeds(language, count, logger)
+    if not seeds:
+        return {"success": False, "error": "No seeds loaded"}
+    
+    # Initialize generator
+    try:
+        generator = DatasetGenerator()
+    except Exception as e:
+        logger.error(f"Failed to initialize generator: {e}")
+        return {"success": False, "error": f"Generator init failed: {e}"}
+    
+    # Generate candidates from seeds
+    try:
+        candidates = generator._generate_candidates_from_seeds(seeds, language)
+        logger.info(f"Generated {len(candidates)} candidates")
+    except Exception as e:
+        logger.error(f"Failed to generate candidates: {e}")
+        return {"success": False, "error": f"Candidate generation failed: {e}"}
+    
+    # Local pre-verification
+    try:
+        locally_verified, needs_model = generator._local_pre_verification(candidates, language)
+        logger.info(f"Local verification: {len(locally_verified)} verified, {len(needs_model)} need model")
+    except Exception as e:
+        logger.error(f"Local verification failed: {e}")
+        return {"success": False, "error": f"Local verification failed: {e}"}
+    
+    # Model verification for remaining candidates
+    model_verified = []
+    if needs_model:
+        try:
+            model_verified = generator._batch_verify_with_model(needs_model, language)
+            logger.info(f"Model verified {len(model_verified)} examples")
+        except Exception as e:
+            logger.error(f"Model verification failed: {e}")
+            return {"success": False, "error": f"Model verification failed: {e}"}
+    
+    # Combine all verified examples
+    all_examples = locally_verified + model_verified
+    
+    # Filter valid examples
+    valid_examples = []
+    failed_parses = 0
+    for ex in all_examples:
+        is_valid, reason = validate_example_schema(ex, generator.required_fields)
+        if is_valid:
+            valid_examples.append(ex)
+        else:
+            failed_parses += 1
+            logger.warning(f"Invalid example: {reason}")
+    
+    # Compute metrics
+    stats = generator._compute_stats(valid_examples)
+    
+    # Save results
+    output_file = f"data/generation_stage_B/{language}/smoke_test_{language}_{len(valid_examples)}.jsonl"
+    Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(output_file, "w", encoding="utf-8") as f:
+        for example in valid_examples:
+            f.write(json.dumps(example, ensure_ascii=False) + "\n")
+    
+    # Write summary log
+    summary = {
+        "timestamp": time.time(),
+        "language": language,
+        "target_count": count,
+        "generated_count": len(valid_examples),
+        "locally_verified": len(locally_verified),
+        "model_verified": len(model_verified),
+        "failed_parses_count": failed_parses,
+        "fabrication_rate": stats["fabrication_rate"],
+        "output_file": output_file,
+        "stats": stats
+    }
+    
+    with open("logs/smoke_test_summary.log", "a", encoding="utf-8") as f:
+        f.write(json.dumps(summary, ensure_ascii=False) + "\n")
+    
+    logger.info(f"Smoke test completed: {len(valid_examples)} examples, fabrication rate: {stats['fabrication_rate']:.2%}")
+    
+    return {
+        "success": len(valid_examples) >= count * 0.8,
+        "generated_count": len(valid_examples),
+        "locally_verified": len(locally_verified),
+        "model_verified": len(model_verified),
+        "failed_parses_count": failed_parses,
+        "fabrication_rate": stats["fabrication_rate"],
+        "output_file": output_file,
+        "stats": stats
+    }
+
+def main():
+    parser = argparse.ArgumentParser(description="Validate smoke test")
+    parser.add_argument("--lang", choices=["ar", "en"], default="ar", help="Language")
+    parser.add_argument("--count", type=int, default=15, help="Number of examples")
+    parser.add_argument("--run", action="store_true", help="Run full smoke test")
+    
+    args = parser.parse_args()
+    logger = setup_logging()
+    
+    if args.run:
+        result = run_smoke_test(args.lang, args.count, logger)
+        
+        # Print results
+        print(f"\n=== SMOKE TEST RESULTS ({args.lang.upper()}) ===")
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        
+        # Exit with appropriate code
+        if result["success"]:
+            sys.exit(0)
+        else:
+            sys.exit(1)
+    else:
+        print("Use --run to execute smoke test")
+
+if __name__ == "__main__":
+    main()
