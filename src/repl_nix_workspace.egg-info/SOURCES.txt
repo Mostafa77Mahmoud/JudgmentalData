@@ -3,6 +3,7 @@ pyproject.toml
 src/convert_to_alpaca.py
 src/data_processor.py
 src/dataset_generator.py
+src/fabrication_checker.py
 src/gemini_client.py
 src/gemini_config.py
 src/knowledge_base.py
@@ -10,6 +11,7 @@ src/parse_utils.py
 src/prompts.py
 src/reference_verifier.py
 src/token_utils.py
+src/uuid_utils.py
 src/repl_nix_workspace.egg-info/PKG-INFO
 src/repl_nix_workspace.egg-info/SOURCES.txt
 src/repl_nix_workspace.egg-info/dependency_links.txt
