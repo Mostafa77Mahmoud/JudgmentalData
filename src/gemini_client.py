@@ -307,9 +307,12 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
     for item in items:
         item["context_excerpt"] = item.get("context_excerpt", "")[:CONTEXT_MAX_CHARS]
 
-    # Calculate tokens conservatively
-    est_tokens_per_item = 600  # Increased estimate for Arabic text
-    max_tokens = min(MAX_OUTPUT_TOKENS * 3, est_tokens_per_item * max(1, len(items)))
+    # Calculate tokens conservatively based on language
+    language = items[0].get("language", "en") if items else "en"
+    est_tokens_per_item = 800 if language == "ar" else 400  # Arabic needs more tokens
+    
+    # Use smaller max tokens to avoid truncation
+    max_tokens = min(MAX_OUTPUT_TOKENS, est_tokens_per_item * max(1, len(items)))
 
     last_err = None
     last_raw_path = None

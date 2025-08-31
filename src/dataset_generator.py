@@ -261,7 +261,7 @@ class DatasetGenerator:
 
             chunk_text = chunks[chunk_id].get("text", "")
 
-            # Truncate context excerpt if too long
+            # Truncate context to safe limit
             MAX_EXCERPT_CHARS = 512
             if "context_excerpt" in candidate and len(candidate["context_excerpt"]) > MAX_EXCERPT_CHARS:
                 self.logger.warning("Context excerpt exceeds %d characters, truncating", MAX_EXCERPT_CHARS)
@@ -397,8 +397,13 @@ class DatasetGenerator:
         verified = []
         chunks = self.processor.arabic_chunks if language == "ar" else self.processor.english_chunks
 
-        for i in range(0, len(candidates), batch_size):
-            batch = candidates[i:i + batch_size]
+        # Group into batches - smaller for Arabic
+        effective_batch_size = 2 if language == "ar" else BATCH_SIZE
+        total_verified = len(verified)
+        remaining = [c for c in candidates if c["id"] not in [v["id"] for v in verified]]
+
+        for i in range(0, len(remaining), effective_batch_size):
+            batch = remaining[i:i + effective_batch_size]
 
             # Prepare items for batch verification
             items = []
