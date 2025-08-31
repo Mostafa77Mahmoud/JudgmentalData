@@ -1,0 +1,29 @@
+
+Loaded 4 unique API keys
+Loaded 2 models from config: ['gemini-2.5-flash', 'gemini-2.5-flash-lite']
+2025-08-31 14:02:29,717 - src.dataset_generator - INFO - Loaded pre-chunked data from chunks.json files
+2025-08-31 14:02:29,720 - src.dataset_generator - INFO - Loaded 610 Arabic seeds, 575 English seeds
+2025-08-31 14:02:31,807 - src.dataset_generator - INFO - Starting smoke test for ar with 20 examples
+2025-08-31 14:02:34,551 - src.dataset_generator - INFO - Generated 24 candidates
+2025-08-31 14:02:34,552 - src.dataset_generator - INFO - Local verification: 4 verified, 20 need model
+2025-08-31 14:02:34,553 - src.gemini_client - ERROR - API call failed, error saved to raw/1756648954552_error_1_att1.resp.json
+2025-08-31 14:02:34,554 - src.gemini_client - ERROR - Verification chunk failed, attempt 1: Unknown field for Schema: additionalProperties
+2025-08-31 14:02:36,575 - src.gemini_client - ERROR - API call failed, error saved to raw/1756648956574_error_2_att2.resp.json
+2025-08-31 14:02:36,575 - src.gemini_client - ERROR - Verification chunk failed, attempt 2: Unknown field for Schema: additionalProperties
+2025-08-31 14:02:40,914 - src.gemini_client - ERROR - API call failed, error saved to raw/1756648960914_error_3_att3.resp.json
+2025-08-31 14:02:40,915 - src.gemini_client - ERROR - Verification chunk failed, attempt 3: Unknown field for Schema: additionalProperties
+2025-08-31 14:02:48,881 - src.gemini_client - ERROR - API call failed, error saved to raw/1756648968881_error_4_att4.resp.json
+2025-08-31 14:02:48,882 - src.gemini_client - ERROR - Verification chunk failed, attempt 4: Unknown field for Schema: additionalProperties
+2025-08-31 14:03:06,263 - src.gemini_client - ERROR - API call failed, error saved to raw/1756648986262_error_5_att5.resp.json
+2025-08-31 14:03:06,263 - src.gemini_client - ERROR - Verification chunk failed, attempt 5: Unknown field for Schema: additionalProperties
+2025-08-31 14:03:07,265 - src.gemini_client - ERROR - API call failed, error saved to raw/1756648987264_error_1_att1.resp.json
+2025-08-31 14:03:07,265 - src.gemini_client - ERROR - Verification chunk failed, attempt 1: Unknown field for Schema: additionalProperties
+2025-08-31 14:03:08,958 - src.gemini_client - ERROR - API call failed, error saved to raw/1756648988957_error_2_att2.resp.json
+2025-08-31 14:03:08,959 - src.gemini_client - ERROR - Verification chunk failed, attempt 2: Unknown field for Schema: additionalProperties
+2025-08-31 14:03:13,459 - src.gemini_client - ERROR - API call failed, error saved to raw/1756648993458_error_3_att3.resp.json
+2025-08-31 14:03:13,460 - src.gemini_client - ERROR - Verification chunk failed, attempt 3: Unknown field for Schema: additionalProperties
+2025-08-31 14:03:21,663 - src.gemini_client - ERROR - API call failed, error saved to raw/1756649001662_error_4_att4.resp.json
+2025-08-31 14:03:21,663 - src.gemini_client - ERROR - Verification chunk failed, attempt 4: Unknown field for Schema: additionalProperties
+  Stopping...
+2025-08-31 14:03:36,957 - src.gemini_client - ERROR - API call failed, error saved to raw/1756649016957_error_5_att5.resp.json
+2025-08-31 14:03:36,958 - src.gemini_client - ERROR - Verification chunk failed, attempt 5: Unknown field for Schema: additionalProperties
