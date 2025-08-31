@@ -1,0 +1,39 @@
+1) سبب الـ error اللي ظهر في اللوجز
+
+الـ logs بتقول: النموذج بيوقف بسبب FinishReason.MAX_TOKENS — يعني إما:
+
+الموديل خرج JSON كبير جداً (طالَبته بكتابة محتوى ضخم مثل سيناريوهات + مراجع مفصّلة)، أو
+
+الـ request شغال على دفعة كبيرة جدّاً من الـ inputs فالنموذج حاول يرد بِـ output أكبر من max_output_tokens المسموح عندك، أو
+
+أنت بتعتمد على response.text من غير ما تتحقق من response.parts (بعض SDKs ترجع أجزاء بدل نص واحد) — لكن الأساس: النموذج اقطع لأن الـ output الحدّ حقه أقل من المطلوب.
+
+2) الخلاصة العملية: استراتيجية ثلاثية المراحل (recommended)
+
+نظام واحد يطلب كل حاجة من الموديل لكن يقلل خطر الاقتطاع ويمنع الاختلاق:
+
+Stage A — Generate scenarios (compact claims)
+أرسِل chunks / النص الأصلي (أو مقتطفات منه) + طلب بسيط: "اعمل 3 سيناريوهات/حالة لكل chunk: TrueClaim, FalseClaim, ParaphraseClaim" — ردود قصيرة (كل سيناريو 1-2 جمل).
+— Output صغير → يقلل MAX_TOKENS.
+
+Stage B — For each generated claim ask for compact evidence pointers
+أرسِل كل Claim (من A) مع الـ chunk النصّي المرفق (أو معطيات chunk_id) واطلب إرجاع دليل كـ (chunk_id, start_char, end_char) + brief excerpt ≤ 300 char و verdict + confidence.
+— بدلاً من أن تطلب من الموديل يعيد whole paragraphs، تطلب offsets وإقتباس قصير — ده يقلّل حجم الـ output ويضمن أنك تحصل على مراجع قابلة للرجوع.
+
+Stage C — Aggregate + validate JSON
+اجمع الناتج (A+B) في ملف JSONL واحد لكل مثال: claim, label(s), evidence pointers, explanation (مقيدة)، confidence, generator_model, raw_response_path.
+— لو النموذج لم يستطع إيجاد نصًا داخل المرفقات، يحط verdict: "Unknown" و suspected_fabrication: true.
+
+هستراتيجية دي تمنع النموذج يطول جداً في ردوده، وتخلي كل استدعاء للموديل أصغر وأقوى تحكماً.
+
+3) قواعد عامة لتقليل الاقتطاع والـ hallucination
+
+Use temperature=0, top_p=1.0 (deterministic).
+
+اطلب من الموديل أن لا يخرج إلا JSON (no prose outside JSON).
+
+اجعل الـ schema صغير ومحدّد (لا تطلب نصوص طويلة داخل الحقول).
+
+max_output_tokens: ابدأ بـ 1500–2000 لكل طلب verification. لو تحتاج أكثر لمراحل تجميع (مثلاً 4000) استخدم gemini-2.5-pro أو قسّم الطلب.
+
+أرسِل كل chunk كمرفق أو كـ message منفصل (short) بدلاً من دمج آلاف الكلمات في رسالة واحدة — ولو لازم ترسل جزء كبير جدًا، قسّم الإدخال إلى دفعات (batching) بحيث كل دفعة داخل limit.

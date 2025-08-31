@@ -1,0 +1,243 @@
+تمام — ممتاز التوضيح ده. بما إنك بتستخدم Gemini 2.5 اللي بتتحمّل لحد ~1,000,000 input tokens وتطلع لحد ~60,000 output tokens، هعدل لك الخطة والتعليمات والكود عشان يستفيدوا من السقف ده بشكل آمن وعملي، ويضيفوا إدارة مفاتيح الـ API (rotation / health / quota) علشان ما تقعش في أخطاء أو قطع مفاجئ. هديك:
+
+تغييرات تكوين مقترحة (قيم ثابتة).
+
+دوال مساعدة للتقدير والتقسيم (token estimator + batcher).
+
+مثال عملي لكيفية استدعاء Gemini مع max_input_tokens و max_output_tokens.
+
+كود لإدارة مفاتيح API (rotation، retries، circuit-breaker باختصار).
+
+إرشادات تشغيلية وسيناريوهات عملية (متى تستخدم سقف كامل ومتى تقلل).
+
+أنا أكتب كل ده جاهز تنسخه في الريبو وتطبقه فورًا.
+
+1 — إعدادات (config) المقترحة
+
+في ملف src/gemini_config.py أو config/keys.json ضع القيم التالية:
+
+# src/gemini_config.py
+MAX_INPUT_TOKENS = 1_000_000   # Gemini 2.5 theoretical input capacity
+MAX_OUTPUT_TOKENS = 60_000     # Gemini 2.5 max per response
+VERIFICATION_OUTPUT_TOKENS = 2_000  # توصية عملية لتجاويز التقطيع خلال verification
+DEFAULT_MODEL = "gemini-2.5-flash"  # أو gemini-2.5-pro للطلبات الثقيلة
+TOKEN_ESTIMATE_CHAR_PER_TOKEN = 4  # heuristic: 1 token ≈ 4 chars (adjustable)
+
+
+ملاحظة: القيم الرسمية قد تختلف حسب واجهة Google؛ لكن بما إنك قلت 1M / 60k — ضبّط القيم دي. أفضل استخدام مكتبة tokenizer حقيقية (openai/tiktoken-equivalent) لو متاحة لاحقًا لتحسين الدقة.
+
+2 — دالة تقدير التوكِن + تقسيم النص (heuristic)
+
+ضع هذه الدوال في src/token_utils.py:
+
+import math
+
+CHARS_PER_TOKEN = 4  # ضبط مبدئي، قلل أو زود بعد اختبار حقيقي
+
+def estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, math.ceil(len(text) / CHARS_PER_TOKEN))
+
+def split_by_token_budget(text: str, max_input_tokens: int) -> list[str]:
+    """قسّم نص طويل إلى قطع تقريبية بحيث لا يتجاوز كل جزء max_input_tokens."""
+    tokens = estimate_tokens(text)
+    if tokens <= max_input_tokens:
+        return [text]
+    # حساب عدد أجزاء متوقع
+    approx_parts = math.ceil(tokens / max_input_tokens)
+    # تقطيع تقريبي حسب الأحرف
+    part_len = math.ceil(len(text) / approx_parts)
+    parts = [text[i:i+part_len] for i in range(0, len(text), part_len)]
+    return parts
+
+
+تذكير: التقدير تقريبي — لو تريد دقة مطلقة استخدم موديول توكنيزرز.
+
+3 — استدعاء Gemini مضبوط مع التحقق من الحدود
+
+تعديل src/gemini_client.py (مقتطف):
+
+from src.gemini_config import MAX_INPUT_TOKENS, MAX_OUTPUT_TOKENS, VERIFICATION_OUTPUT_TOKENS, DEFAULT_MODEL
+from src.token_utils import estimate_tokens, split_by_token_budget
+import time, json, logging
+
+logger = logging.getLogger(__name__)
+
+def call_gemini_model(client, model_name, prompt_text, max_output_tokens=None, max_input_tokens=None, **kwargs):
+    """
+    Robust wrapper:
+    - يتأكد من حدود المدخلات والمخرجات
+    - يعالج finish_reason: MAX_TOKENS
+    - يرجع النص الكامل من response.parts
+    """
+    if max_output_tokens is None:
+        max_output_tokens = MAX_OUTPUT_TOKENS
+    if max_input_tokens is None:
+        max_input_tokens = MAX_INPUT_TOKENS
+
+    input_tokens = estimate_tokens(prompt_text)
+    if input_tokens > max_input_tokens:
+        raise ValueError(f"Input tokens ({input_tokens}) exceed max_input_tokens ({max_input_tokens}). Split input first.")
+
+    generation_config = {
+        "model": model_name,
+        "max_output_tokens": max_output_tokens,
+        "temperature": kwargs.get("temperature", 0.0),
+        "top_p": kwargs.get("top_p", 1.0),
+    }
+
+    # real call (pseudo, حسب مكتبتك)
+    response = client.generate(prompt=prompt_text, **generation_config)
+
+    # جمع الأجزاء
+    text = ""
+    parts = getattr(response, "parts", None)
+    if not parts:
+        # حط هنا حفظ raw response للـ debugging
+        raw_path = save_raw_response("no_parts", response)
+        logger.error("No response parts, saved raw: %s", raw_path)
+        raise RuntimeError("No parts in response")
+
+    for part in parts:
+        if hasattr(part, "text") and part.text:
+            text += part.text
+
+    finish_reason = getattr(response, "finish_reason", None) or getattr(response, "status", {}).get("finish_reason")
+    if finish_reason and "MAX_TOKENS" in str(finish_reason).upper():
+        raw_path = save_raw_response("truncated", response)
+        logger.warning("Model truncated (MAX_TOKENS). raw -> %s", raw_path)
+        raise RuntimeError("Model response truncated: increase max_output_tokens or reduce requested output size")
+
+    return text
+
+def save_raw_response(tag, response):
+    import os, time, json
+    fname = f"raw/{int(time.time()*1000)}_{tag}.resp.json"
+    os.makedirs("raw", exist_ok=True)
+    try:
+        with open(fname, "w", encoding="utf-8") as f:
+            json.dump({"response": str(response)}, f, ensure_ascii=False, indent=2)
+    except Exception:
+        with open(fname, "w", encoding="utf-8") as f:
+            f.write(str(response))
+    return fname
+
+4 — استراتيجيات استغلال 60k output safely
+
+لا تطلب من الموديل في استدعاء واحد يكتب آلاف السيناريوهات الطويلة. بدلاً من ذلك:
+
+اطلب مخرجات مجزأة: كل استدعاء يخرج حتى 1–5 أمثلة مفصّلة أو حتى 10–50 أمثلة مختصرة.
+
+إذا تريد رد طويل (مثلاً 20k tokens) استخدم gemini-2.5-pro مع تقسيم العمل على دفعات متسلسلة (streaming aggregation).
+
+عندما تطلب مراجع مفصّلة، اطلب offsets + مقتطف قصير بدل full text؛ هذا يقلّل output tokens بشكل كبير.
+
+5 — إدارة مفاتيح API: rotation + health + quotas
+
+ضع هذا الملف src/api_key_manager.py:
+
+import time, threading, logging, collections
+
+logger = logging.getLogger(__name__)
+
+class APIKey:
+    def __init__(self, key):
+        self.key = key
+        self.failed = 0
+        self.last_used = 0
+        self.calls = 0
+        self.locked_until = 0
+
+class APIKeyManager:
+    def __init__(self, keys, per_key_rate_limit=1000):
+        self.keys = [APIKey(k) for k in keys]
+        self.idx = 0
+        self.lock = threading.Lock()
+        self.per_key_rate_limit = per_key_rate_limit
+        self.calls_window = collections.defaultdict(list)  # key -> timestamps
+
+    def get_key(self):
+        with self.lock:
+            n = len(self.keys)
+            for _ in range(n):
+                self.idx = (self.idx + 1) % n
+                candidate = self.keys[self.idx]
+                now = time.time()
+                if candidate.locked_until and candidate.locked_until > now:
+                    continue
+                # simple per-minute throttle example
+                window = self.calls_window[candidate.key]
+                # drop old
+                window = [t for t in window if t > now - 60]
+                self.calls_window[candidate.key] = window
+                if len(window) >= self.per_key_rate_limit:
+                    # temporarily skip this key
+                    candidate.locked_until = now + 5  # backoff small
+                    continue
+                # use this key
+                self.calls_window[candidate.key].append(now)
+                candidate.last_used = now
+                candidate.calls += 1
+                return candidate.key
+            # none available
+            raise RuntimeError("No API key available right now")
+
+    def report_failure(self, key, error):
+        # mark failing key, exponential backoff simple
+        for k in self.keys:
+            if k.key == key:
+                k.failed += 1
+                backoff = min(60 * (2 ** (k.failed-1)), 3600)
+                k.locked_until = time.time() + backoff
+                logger.warning("Key %s reported failure. locking for %s sec", key, backoff)
+                return
+
+    def report_success(self, key):
+        for k in self.keys:
+            if k.key == key:
+                k.failed = 0
+                return
+
+
+وفي gemini_client استخدم APIKeyManager.get_key() لإعداد Authorization header لكل طلب، وإذا فشل الطلب (rate limit/500/invalid_key) استدعي report_failure(key, err), حاول مفتاح تاني مع exponential backoff.
+
+6 — retry / backoff pattern (pseudo)
+def safe_api_call(api_key_manager, make_call_fn, max_attempts=5):
+    attempt = 0
+    while attempt < max_attempts:
+        attempt += 1
+        key = api_key_manager.get_key()
+        try:
+            return make_call_fn(key)
+        except Exception as e:
+            api_key_manager.report_failure(key, e)
+            sleep = min(2 ** attempt, 60)
+            time.sleep(sleep)
+    raise RuntimeError("All keys failed after retries")
+
+7 — توصيات تشغيلية نهائية (practical)
+
+استخدم حدود 1_000_000 / 60_000 في الكونفيج لكن عمليًا لا ترسل دفعة input تقرب هذا الحد دفعة واحدة — قسّم.
+
+استخدم VERIFICATION_OUTPUT_TOKENS = 2000 للـ verification لأنك عادة تحتاج JSON صغير. لو تحتاج تقرير كبير استخدم مَرَّات أو model pro.
+
+اطلب JSON-only في البرومبتات، واطلب حقول صغيرة (offsets بدلاً من full evidences) لتقليل احتمالات truncation.
+
+راقب finish_reason باستمرار — سجّل كل raw response عند truncation لتحليل إذا كان النموذج يرفض schema أو يطول.
+
+مفاتيح API: ضع manager كما فوق ودوّر المفاتيح. سجّل health metrics لكل مفتاح (failures/rate).
+
+قيمة التكلفة: استخدام حدود كبيرة يعني تكلفة عالية — راقب التكلفة واستخدم دفعات أصغر عند الحاجة.
+
+8 — مثال end-to-end موجز لتدفقك (pseudo)
+
+اقرأ chunk من inputs/arabic_chunks.json
+
+قسم chunk إذا أكبر من MAX_INPUT_TOKENS (split_by_token_budget)
+
+Stage A: اطلب من Gemini إنشاء 3 سيناريوهات لكل جزء (prompt compact) مع max_output_tokens=1500.
+
+Stage B: لكل claim اطلب verifier مع VERIFICATION_OUTPUT_TOKENS=2000، ولّد evidence as offsets.
+
+اجمع وأكتب JSONL النهائي.
