@@ -110,8 +110,10 @@ class DatasetGenerator:
             chunk_refs.append({"id": i+1, "original_id": chunk.get("id", f"chunk_{i}")})
         
         if language == "ar":
+            # Reduce target count to prevent truncation
+            actual_target = min(target_count, 5)
             prompt = f"""
-أنت خبير في إنشاء بيانات تدريب للذكاء الاصطناعي. مهمتك إنشاء {target_count} مثال من نوع "judgmental dataset" باللغة العربية.
+أنت خبير في إنشاء بيانات تدريب للذكاء الاصطناعي. مهمتك إنشاء {actual_target} أمثلة فقط من نوع "judgmental dataset" باللغة العربية.
 
 النص المرجعي:
 {context_text}
@@ -142,8 +144,10 @@ class DatasetGenerator:
 ]
 """
         else:
+            # Reduce target count to prevent truncation
+            actual_target = min(target_count, 5)
             prompt = f"""
-You are an expert in creating AI training data. Your task is to generate {target_count} examples for a "judgmental dataset" in English.
+You are an expert in creating AI training data. Your task is to generate {actual_target} examples for a "judgmental dataset" in English.
 
 Reference text:
 {context_text}
@@ -189,8 +193,9 @@ Return ONLY valid JSON without any additional text:
                 result = self.gemini_client.call_model(
                     prompt=prompt,
                     model="gemini-2.5-flash",
-                    max_tokens=6000,
-                    temperature=0.3
+                    max_tokens=20000,  # Increased from 6000
+                    temperature=0.3,
+                    auto_retry_truncation=True
                 )
                 
                 if not result["success"]:

@@ -1,3 +1,49 @@
+
+def extract_text_from_response(response) -> str:
+    """Extract text from various response formats"""
+    if not response:
+        return ""
+    
+    # Handle dict response (from JSON API)
+    if isinstance(response, dict):
+        if "candidates" in response:
+            texts = []
+            for candidate in response["candidates"]:
+                if isinstance(candidate, dict):
+                    content = candidate.get("content", {})
+                    if isinstance(content, dict) and "parts" in content:
+                        for part in content["parts"]:
+                            if isinstance(part, dict) and "text" in part:
+                                texts.append(part["text"])
+                    elif isinstance(content, dict) and "text" in content:
+                        texts.append(content["text"])
+            return "".join(texts)
+        
+        if "output" in response:
+            output = response["output"]
+            if isinstance(output, list):
+                return "".join([p.get("text", "") for p in output if isinstance(p, dict)])
+            elif isinstance(output, dict) and "text" in output:
+                return output["text"]
+    
+    # Handle SDK response object
+    if hasattr(response, 'candidates') and response.candidates:
+        texts = []
+        for candidate in response.candidates:
+            if hasattr(candidate, 'content') and candidate.content:
+                if hasattr(candidate.content, 'parts') and candidate.content.parts:
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'text') and part.text:
+                            texts.append(part.text)
+        return "".join(texts)
+    
+    # Fallback to response.text if available
+    if hasattr(response, 'text'):
+        return response.text
+    
+    return str(response)
+
+
 import time
 import random
 import json
@@ -584,7 +630,8 @@ class GeminiClient:
                    model: str = "gemini-2.5-flash",
                    max_tokens: int = 40000,
                    temperature: float = 0.0,
-                   max_attempts: int = 3) -> Dict:
+                   max_attempts: int = 3,
+                   auto_retry_truncation: bool = True) -> Dict:
         """Call Gemini model using Google GenAI SDK"""
 
         # Use available models from config
@@ -622,7 +669,7 @@ class GeminiClient:
                         contents=prompt,
                         config=types.GenerateContentConfig(
                             temperature=temperature,
-                            max_output_tokens=min(max_tokens, 2000),
+                            max_output_tokens=min(max_tokens, MAX_OUTPUT_TOKENS),
                             response_mime_type="application/json"
                         )
                     )
@@ -637,7 +684,7 @@ class GeminiClient:
                         prompt,
                         generation_config=genai.GenerationConfig(
                             temperature=temperature,
-                            max_output_tokens=min(max_tokens, 2000)
+                            max_output_tokens=min(max_tokens, MAX_OUTPUT_TOKENS)
                         )
                     )
                     latency = time.time() - start_time
@@ -650,10 +697,25 @@ class GeminiClient:
                     # Check finish reason
                     finish_reason = getattr(candidate, 'finish_reason', None)
                     if finish_reason and finish_reason != 'STOP':
+                        # Handle MAX_TOKENS with smart retry
+                        if "MAX_TOKENS" in str(finish_reason).upper() and auto_retry_truncation and attempt < max_attempts - 1:
+                            if max_tokens < MAX_OUTPUT_TOKENS:
+                                new_max_tokens = min(MAX_OUTPUT_TOKENS, max_tokens * 2)
+                                self.logger.info(f"Truncated - increasing max_output_tokens from {max_tokens} to {new_max_tokens}")
+                                return self.call_model(prompt, model, new_max_tokens, temperature, max_attempts, auto_retry_truncation)
+                            else:
+                                self.logger.warning("Truncated even at maximum allowed tokens - consider splitting request")
+                        
                         error_msg = f"Model finished with reason: {finish_reason}. Response may be incomplete or blocked."
                         self.logger.warning(error_msg)
                         raw_path = self._save_raw_response(response, prompt, attempt)
-                        raise Exception(f"{error_msg} Raw response saved to: {raw_path}")
+                        
+                        # If it's truncation, still return partial content if available
+                        if "MAX_TOKENS" in str(finish_reason).upper():
+                            # Try to extract partial content
+                            pass  # Continue to text extraction below
+                        else:
+                            raise Exception(f"{error_msg} Raw response saved to: {raw_path}")
 
                     # Extract text from new SDK response format
                     if hasattr(candidate, 'content') and candidate.content and hasattr(candidate.content, 'parts'):
