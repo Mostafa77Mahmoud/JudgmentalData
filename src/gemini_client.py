@@ -98,6 +98,7 @@ def send_verify_request(model_name: str, api_key: str, prompt_text: str, max_tok
         generation_config = genai.GenerationConfig(
             temperature=VERIFIER_TEMPERATURE,
             max_output_tokens=max_tokens,
+            response_mime_type="application/json"
         )
 
         response = model.generate_content(
@@ -161,12 +162,17 @@ def robust_parse_json_array(text: str) -> Optional[List[Dict]]:
         logger.warning(f"Response too short ({len(text)} chars): {text[:100]}")
         return None
 
-    # Remove common wrapper text and markdown
+    # Clean the response text more thoroughly
     text = text.strip()
-    if text.startswith("```json"):
-        text = text[7:]
-    if text.endswith("```"):
-        text = text[:-3]
+    
+    # Remove all markdown blocks
+    import re
+    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'```\s*$', '', text, flags=re.MULTILINE)
+    
+    # Remove any leading/trailing explanatory text
+    text = re.sub(r'^[^[\{]*', '', text)  # Remove text before JSON starts
+    text = re.sub(r'[^\]\}]*$', '', text)  # Remove text after JSON ends
     text = text.strip()
 
     # Direct parse attempt
@@ -176,8 +182,8 @@ def robust_parse_json_array(text: str) -> Optional[List[Dict]]:
             return parsed
         elif isinstance(parsed, dict):
             return [parsed]
-    except json.JSONDecodeError:
-        pass
+    except json.JSONDecodeError as e:
+        logger.warning(f"Direct JSON parse failed: {e}")
 
     # Find balanced JSON structure
     candidate = find_json_bounds(text)
@@ -188,8 +194,24 @@ def robust_parse_json_array(text: str) -> Optional[List[Dict]]:
                 return parsed
             elif isinstance(parsed, dict):
                 return [parsed]
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as e:
+            logger.warning(f"Balanced JSON parse failed: {e}")
+
+    # Try to fix common JSON issues
+    try:
+        # Fix incomplete JSON by adding closing brackets
+        if text.count('[') > text.count(']'):
+            text += ']' * (text.count('[') - text.count(']'))
+        if text.count('{') > text.count('}'):
+            text += '}' * (text.count('{') - text.count('}'))
+        
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return parsed
+        elif isinstance(parsed, dict):
+            return [parsed]
+    except json.JSONDecodeError:
+        pass
 
     logger.error(f"Failed to parse JSON from response: {text[:200]}")
     return None
@@ -215,36 +237,52 @@ def create_manual_review_item(candidate_id: str, claim: str, chunk_excerpt: str,
     logger.info(f"Created manual review item: {review_file}")
     return review_file
 
-# Updated verifier prompt to be more accurate
+# Updated verifier prompt to be more strict and reduce fabrication
 VERIFIER_PROMPT = '''
-You are a fact verification system. For each claim, check if it can be verified from the provided context excerpt.
+You are a fact verification system. You must output ONLY valid JSON, without markdown, without explanations, without comments.
 
-STRICT RULES:
-1. If the claim's content appears in the context excerpt (even if paraphrased), respond with verdict="True"
-2. If the claim contradicts the context or cannot be found, respond with verdict="False" 
-3. For True verdicts: provide the exact reference text from context that supports the claim
-4. For False verdicts: use reference="UNKNOWN" and set suspected_fabrication=true
+CRITICAL RULES:
+1. If the provided context does not contain enough information to decide, set "verdict": "Unknown" and leave "explanation" empty
+2. Never invent, hallucate, or rephrase information not explicitly present in the context
+3. Always copy exact phrases from the provided context when filling fields
+4. Only set verdict="True" if the claim is LITERALLY present or can be directly inferred from the context
+5. If you cannot find explicit evidence, use verdict="False" or "Unknown"
 
-Output ONLY a JSON array with these exact fields for each item:
-- id: string (copy from input)
-- language: string (copy from input) 
-- claim: string (copy from input)
-- context_chunk_id: number (copy from input)
-- context_excerpt: string (copy from input)
-- verdict: "True" or "False"
-- explanation: string (brief reasoning)
-- reference: string (exact text from context if True, "UNKNOWN" if False)
-- suspected_fabrication: boolean (false if True verdict, true if False verdict)
-- generator_model: "local"
-- raw_response_path: ""
-- meta: object with confidence field (0.9-1.0 for True, 0.1-0.5 for False)
-
-Respond with ONLY the JSON array, no other text:
+Output format - ONLY JSON array, no markdown blocks:
+[
+  {
+    "id": "copy_from_input",
+    "language": "copy_from_input", 
+    "claim": "copy_from_input",
+    "context_chunk_id": copy_number_from_input,
+    "context_excerpt": "copy_from_input",
+    "verdict": "True|False|Unknown",
+    "explanation": "brief_reasoning_or_empty_if_unknown",
+    "reference": "exact_text_from_context_or_UNKNOWN",
+    "suspected_fabrication": true_if_false_or_unknown,
+    "generator_model": "local",
+    "raw_response_path": "",
+    "meta": {"confidence": 0.1_to_1.0}
+  }
+]
 '''
 
 def prepare_verifier_request(items: List[Dict], max_tokens: int) -> str:
-    """Prepare verification request"""
-    return VERIFIER_PROMPT + "\n\nINPUT_ITEMS:\n" + json.dumps(items, ensure_ascii=False)
+    """Prepare verification request with language-specific prompts"""
+    # Detect language from first item
+    language = items[0].get("language", "en") if items else "en"
+    
+    try:
+        from src.prompts import ARABIC_VERIFIER_PROMPT, ENGLISH_VERIFIER_PROMPT
+        if language == "ar":
+            base_prompt = ARABIC_VERIFIER_PROMPT
+        else:
+            base_prompt = ENGLISH_VERIFIER_PROMPT
+    except ImportError:
+        # Fallback to default prompt
+        base_prompt = VERIFIER_PROMPT
+    
+    return base_prompt + "\n\nINPUT_ITEMS:\n" + json.dumps(items, ensure_ascii=False)
 
 def batch_verify(items: List[Dict]) -> List[Dict]:
     """Batch verify items using Google Generative AI SDK"""
