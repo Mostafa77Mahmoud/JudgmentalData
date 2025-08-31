@@ -339,7 +339,7 @@ def batch_verify_single(items: List[Dict]) -> List[Dict]:
 class GeminiClient:
     """Production-ready Gemini client with load balancing and failover"""
 
-    def __init__(self, config_file: str):
+    def __init__(self, config_file: str = None):
         self.logger = logging.getLogger(__name__)
         self.lock = threading.Lock()
         self.api_keys = API_KEYS
@@ -371,8 +371,14 @@ class GeminiClient:
                    temperature: float = 0.0, max_attempts: int = 3) -> Dict:
         """Call Gemini model using new SDK with multiple model support"""
         
-        # Validate model name
-        supported_models = ["models/gemini-2.0-flash", "models/gemini-2.0-pro", "models/gemini-2.5-flash-lite"]
+        # Validate model name - update supported models based on documentation
+        supported_models = [
+            "models/gemini-2.0-flash", 
+            "models/gemini-2.0-pro", 
+            "models/gemini-2.5-flash-lite",
+            "models/gemini-2.5-flash",
+            "models/gemini-2.5-pro"
+        ]
         if model not in supported_models:
             self.logger.warning(f"Model {model} not in supported list, using gemini-2.0-flash")
             model = "models/gemini-2.0-flash"
@@ -435,7 +441,7 @@ class GeminiClient:
 
         return {"success": False, "error": "Max attempts exceeded", "raw_text": ""}
 
-    def generate_with_thinking(self, prompt: str, model: str = "models/gemini-2.0-flash", 
+    def generate_with_thinking(self, prompt: str, model: str = "models/gemini-2.5-flash", 
                               disable_thinking: bool = False) -> Dict:
         """Generate content with optional thinking mode (for 2.5 models)"""
         
@@ -444,13 +450,54 @@ class GeminiClient:
             "max_output_tokens": 8192,
         }
         
-        # Disable thinking for 2.5 Flash if requested
+        # Disable thinking for 2.5 models if requested
         if "2.5" in model and disable_thinking:
             config_params["thinking_config"] = types.ThinkingConfig(
-                include_thinking=False
+                thinking_budget=0  # This disables thinking as per documentation
             )
         
         return self.call_model(prompt, model, **config_params)
+
+    def generate_structured_output(self, prompt: str, response_schema: Any, 
+                                 model: str = "models/gemini-2.0-flash") -> Dict:
+        """Generate structured output using pydantic schemas"""
+        key, key_index = self._get_next_available_key()
+        
+        if key is None:
+            return {"success": False, "error": "No API keys available", "raw_text": ""}
+
+        try:
+            client = genai.Client(api_key=key)
+            
+            config = types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=response_schema,
+                temperature=0.0,
+                max_output_tokens=8192
+            )
+
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=config
+            )
+
+            # Check if response was parsed automatically
+            parsed_data = None
+            if hasattr(response, 'parsed') and response.parsed:
+                parsed_data = response.parsed
+
+            return {
+                "success": True,
+                "raw_text": response.text if hasattr(response, 'text') else "",
+                "parsed": parsed_data,
+                "model": model,
+                "key_index": key_index
+            }
+
+        except Exception as e:
+            self.logger.error(f"Structured generation failed: {e}")
+            return {"success": False, "error": str(e), "raw_text": ""}
 
     def get_key_status(self) -> Dict:
         """Get status of all API keys"""

@@ -528,7 +528,7 @@ class DatasetGenerator:
         seeds_data = self.arabic_seeds if language == "ar" else self.english_seeds
         if not seeds_data or len(seeds_data) == 0:
             raise ValueError(f"No seeds data available for language {language}")
-        
+
         sample_size = min(target_count, len(seeds_data))
         smoke_seeds = random.sample(list(seeds_data), sample_size)
 
@@ -609,7 +609,7 @@ class DatasetGenerator:
         batch_size = 50
         if not seeds_data or len(seeds_data) == 0:
             raise ValueError(f"No seeds data available for language {language}")
-            
+
         while len(all_examples) < target and processed_seeds < len(seeds_data):
             batch_seeds = seeds_data[processed_seeds:processed_seeds + batch_size]
 
