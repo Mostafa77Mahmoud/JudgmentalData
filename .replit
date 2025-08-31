@@ -3,6 +3,7 @@ run = "python app.py"
 
 [nix]
 channel = "stable-25_05"
+packages = ["glibcLocales"]
 
 [deployment]
 run = ["sh", "-c", "python app.py"]
@@ -18,3 +19,12 @@ mode = "sequential"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python main.py --smoke --lang ar"
+
+[[workflows.workflow]]
+name = "streamlit"
+mode = "sequential"
+author = 47083209
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python app.py"
