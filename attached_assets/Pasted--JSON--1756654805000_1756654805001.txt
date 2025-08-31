@@ -1,0 +1,183 @@
+ممتاز — شفت البيانات واللوجات والـ JSON اللي رجعولك. المشكلة واضحة: النموذج بيخترع أو يرجّح ادعاءات بدون دليل كافٍ (fabrication rate = 40%). هنشتغل عملياً على خفض الـ fabrication إلى ≤10% عبر تغييرات فورية ومجرّبة: (1) برومبت صارم للـ generator، (2) برومبت صارم للـ verifier، (3) ضبطات الـ API (tokens, temp, rotation)، (4) قواعد post-check تلقائيّة. هديك كل حاجة جاهزة للصق في الكود.
+
+أقرأ بسرعة، طبّق التعديلات التالية خطوة بخطوة، وشوف التحسّن على smoke test.
+
+1) قواعد عامة يجب تطبيقها فوراً
+
+اعطِ النموذج فقط النص (chunk) المحدد: لا تمرّر له مكتبة كاملة أو أسماء ملفات أو ملخصات — فقط chunk المعني.
+
+ضع temperature=0 و top_p=0 (deterministic) لكل نداءات التحقق (verifier) ولتوليد الادعاءات عندما تريد دقة.
+
+اطلب إخراجاً مُهيكلاً فقط (strict JSON) — لا كلام خارجي. اجعل الـ verifier يرفض أو يُعلّم خروجاً واضحاً بدل الاختلاق.
+
+اعْلم النموذج صراحةً أنه ممنوع من سرد مراجع خارج chunk — إن لم يجد نصًا مطابقًا فليرجع suspected_fabrication: true و verdict: "Unknown" أو False حسب القاعدة.
+
+حدد أقصى طول للـ evidence excerpt (مثلاً ≤750 حرف) وألزم وجود start_char و end_char.
+
+حدّد max_output_tokens في كل request (مثلاً verifier 2000، generator قابلة للزيادة حسب عدد السيناريوهات) — ولا تعتمد على الافتراضات داخل المكتبة.
+
+2) برومبت صارم للـ Generator (عربي) — اجعل كل الادعاءات مشتقة فقط من الـ chunk
+
+الصق هذا كاملاً في دالة الاستدعاء التي ترسل chunk إلى النموذج:
+
+انت مُحرر/مولد بيانات (Dataset Generator). عندك فقط هذا النص (CONTEXT) — لا يُسمح لك بالرجوع لأي مصدر خارجي ولا بصنع مراجع. المطلوب:
+1) اقرأ CONTEXT بالتمام.
+2) استخرج حتى 3 ادعاءات قصيرة (claims) قابلة للتمييز عن CONTEXT، كل ادعاء يجب أن يكون:
+   - عبارة عن جملة واحدة قصيرة (≤30 كلمة).
+   - مشتقة مباشرة من CONTEXT (لا إضافات فكرية من عندك).
+3) لكل ادعاء أدرج حقل evidence واحد على الأقل مأخوذ حرفياً من CONTEXT:
+   - evidence.excerpt يجب أن يكون substring موجود حرفياً في CONTEXT وبحد أقصى 750 حرف.
+   - evidence.start_char و evidence.end_char (مواقع في CONTEXT، 0-index).
+4) أعد نتيجة بصيغة JSON array فقط، الشكل لكل عنصر:
+{
+ "id":"<uuid>",
+ "language":"ar",
+ "claim":"<short claim>",
+ "evidence":[{"chunk_id":<int>,"start_char":<int>,"end_char":<int>,"excerpt":"<≤750 chars>"}],
+ "meta":{"generator_stage":"generation_only"}
+}
+5) إن لم تستطع استخراج أي ادعاء مباشر من النص، ارجع [] (مصفوفة فارغة).
+6) **صريح**: لا تضيف تفسير أو استدلال. لا تُخْرِج نص خارجي أو تعليقات. فقط JSON.
+
+
+إعدادات API المقترحة للـ generator: temperature=0, top_p=0, max_output_tokens=12000 (أو أقل حسب حجم السيناريوات المطلوب توليدها).
+
+المهم: كل claim يجب أن يستند إلى substring من الـ chunk مع start/end indices — هذا يمنع الاختلاق.
+
+3) برومبت صارم للـ Verifier (عربي) — تقييم الادعاءات وإظهار إن كانت مختلقة
+
+استخدم نداء verifier منفصل لكل (claim + chunk) أو لكل batch صغير (مثلاً 1 claim لكل request أو حتى 5). الصق هذا:
+
+أنت "Verifier" دقيق جداً. لديك:
+- CLAIM: "<...>"
+- CONTEXT: "...." (المقطع النصي المصدر بالكامل — استخدم إحداثيات start_chars أدناه إن لزم)
+
+المطلوب: قرر ما إذا كان CLAIM:
+  - "True" إذا يمكن إثباته حرفيًا أو باستنتاج منطقي مباشر ومستند إلى جملة/جزء واضح في CONTEXT.
+  - "False" إذا النص يُنقض الادعاء صراحة.
+  - "Unknown" إذا لا يوجد دليل كافٍ داخل CONTEXT.
+
+قواعد صارمة:
+1) **يُسمح فقط بالاستدلال على أساس ما هو داخل CONTEXT**. ممنوع جلب أو اختلاق مراجع خارجية.
+2) إن ثبت الادعاء، يجب إظهار قائمة الأدلة evidence[] حيث كل عنصر يحتوي على:
+   - chunk_id: نفس الـ id الذي أرسِل
+   - start_char, end_char: إحداثيات substring داخل CONTEXT (0-indexed)
+   - excerpt: النص المُقتبس حرفيًا (≤750 chars)
+3) explanation: جملة موجزة ≤ 60 كلمة تشرح سبب القرار بالاعتماد على المحتوى المذكور فقط.
+4) suspected_fabrication: boolean. **يجب أن يكون true** إذا لم تستطع دعم CLAIM بأي اقتباس/إثبات من CONTEXT أو إن الاستنتاج يتطلب معلومات خارجية.
+5) confidence: عدد من 0.0 إلى 1.0
+6) model_used: اسم النموذج المستخدم
+
+أعد **JSON object only** بالهيكل التالي (لا كلام آخر):
+
+{
+ "id":"<same uuid>",
+ "verdict":"True|False|Unknown",
+ "evidence":[{"chunk_id":<int>,"start_char":<int>,"end_char":<int>,"excerpt":"<≤750 chars>"}],
+ "explanation":"<≤60 words>",
+ "confidence":0.0-1.0,
+ "suspected_fabrication": true|false,
+ "model_used":"gemini-2.5-flash"
+}
+
+
+إعدادات API للـ verifier: temperature=0, top_p=0, max_output_tokens=2000 (غالبًا كافية للJSON المرتجع).
+
+4) مثال استدعاء API عملي (مقتطف httpx) — تأكد تضمين max_output_tokens و Authorization
+import httpx, time, json
+def call_gemini_model(prompt_text, model="gemini-2.5-flash", max_output_tokens=2000, api_key="..."):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    payload = {
+      "prompt": {"text": prompt_text},
+      "max_output_tokens": max_output_tokens,
+      "temperature": 0.0,
+      "top_p": 0.0
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type":"application/json; charset=utf-8"}
+    r = httpx.post(url, headers=headers, json=payload, timeout=120)
+    ts = int(time.time()*1000)
+    open(f"raw/{ts}_{model}.resp.txt","wb").write(r.content)
+    r.raise_for_status()
+    return r.json()
+
+
+مهم: لو تستخدم مكتبة google_genai قد يكون بناء request مختلف — تأكد من كون max_output_tokens في generation_config أو الحقل الصحيح الذي المكتبة تطلبه.
+
+5) فحص اوتوماتيكي بعد الإخراج (post-check) — خوارزمية سريعة لتخفيض الـ fabrication
+
+بعد المولد والتحقق (generator + verifier) طبق قواعد أوتوماتيكية:
+
+إذا suspected_fabrication == true أو evidence فارغ → اعتمد verdict = Unknown وعلّم العنصر للمراجعة اليدوية. اعتبِر هذا حالة non-verified.
+
+احسب fabrication_rate = count(suspected_fabrication)/total. إذا > 0.10:
+
+اضغط الـ pipeline: استخدم temperature=0 في الgenerator أيضًا (قلّل الإبداع).
+
+قلّل عدد الادعاءات المولدة لكل chunk (مثلاً 1 بدلاً من 3).
+
+زد صرامة البرومبت (أمره بالاستناد لكلمة/جملة واحدة فقط).
+
+ضَع حدًا أدنى لإجمالي طول evidence substring (مثلاً ≥10 chars) وإلا نعتبره مش كافٍ → suspected_fabrication true.
+
+مثال دالة حساب ومراقبة:
+
+def compute_fab_rate(results):
+    total=len(results)
+    fab=sum(1 for r in results if r.get("suspected_fabrication"))
+    return fab/total, fab, total
+
+6) معالجة حالات الـ JSON الجزئي أو التقطّع (truncation)
+
+سجّل الردود الخام (raw/*.resp.txt) إذا النموذج ترَكَ finish_reason=MAX_TOKENS أو STOP.
+
+إذا رأيت MAX_TOKENS غالبًا: امّا زوّد max_output_tokens (حتى 60k) أو قسّم المهمة (batch smaller).
+
+لكن لأننا نطالب JSON قصير للـ verifier، عادة 2k كافٍ؛ إن كان النموذج لا يلتزم ويحاول طباعة شروحات طويلة فتأكد أن البرومبت يطلب: JSON only — NOTHING else.
+
+7) نصائح حول إدارة مفاتيح API (rotation)
+
+تأكّد أن اختيار key يتم قبل كل request: key = api_key_manager.get_key() ثم استخدمه في headers.
+
+سجّل فشل/نجاح key: عند فشل HTTP 5xx أو rate-limit علّم key كمستخدم سيء ودوّر.
+
+تأكد أن الـ client لا يبقي إعداد key مخزّنًا global ثابت بين الطلبات.
+
+8) إجراءات عملية فورية (نسخ/لصق) — تـيست سريع تطبقه الآن
+
+استبدل برومبت الـ generator الحالي بالـ Generator prompt أعلاه.
+
+استبدل برومبت الـ verifier الحالي بالـ Verifier prompt أعلاه.
+
+في كل استدعاء تأكد من تمرير:
+
+temperature=0, top_p=0, max_output_tokens صريح.
+
+عدّل pipeline لتوليد 1 claim لكل chunk في البداية (لتقليل الأخطاء).
+
+شغّل smoke test مع عدد صغير (10 chunks) واطلع على raw/ responses وملف الملخص. احسب fabrication_rate كما في الدالة أعلاه.
+
+9) تفسير JSON اللي بعته: لماذا fabrication=40%؟
+
+من بياناتك:
+
+مولّد أعطى 5 عناصر؛ verifier علّم عنصرين على أنهما suspected_fabrication true. -> 2/5 = 40%.
+السبب المحتمل:
+
+الـ generator صاغ ادعاءات ليست مقتبسة حرفيًا (مقتطفات غير موجودة أو شروحات إضافية) → verifier لم يجد substring قابل للاقتباس → suspected_fabrication true.
+أو: verifier نفسه لم يُجبر بقوة كافية على ردّ “fabrication” عند عدم وجود اقتباسات واضحة.
+
+10) مثال عملي سريع: كيف سيبدو إدخال واحد + نداء verifier
+
+قدِّم للنموذج CONTEXT كـ string مع حقل chunk_id.
+
+أرسل claim واحد منه.
+
+انتظر JSON من الـ verifier.
+
+هذا سيجعل النظام صارماً: إما يدعم claim باقتباس + start/end أو يعلّمه كfabricated.
+
+11) إذا حابب — Patch جاهز
+
+أقدر ألصّق لك الآن ثلاث شفرات صغيرة جاهزة للصق في src/gemini_client.py, src/pipeline.py, وprompts/strict_ar.json (أمثلة). أرفقها فوراً لو تريد — لكن بما إنك قلت "نفّذ وعدّل" ممكن تلصقهم بنفسك. قلّي تفضل أرجّعلك patch كامل ولا حطّ لك المقاطع هنا؟ (أنا جاهز ألصق كل ملف لو تحب).
+
+خلاصة سريعة: ابدأ بتقليل الإبداع (temperature=0)، إجباريّة الاقتباس (start/end + excerpt)، إجبارية JSON-only، تأكيد إرسال max_output_tokens لكل طلب، وتقسيم المهام إن لزم. بعد تنفيذ هذه التعديلات شغّل smoke test صغير (10) وأعطني مخرجات الـ raw الأولى — هحللهم فوراً ونخفض الـ fabrication إلى تحت 10%.
