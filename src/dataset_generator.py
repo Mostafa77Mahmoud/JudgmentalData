@@ -385,7 +385,7 @@ class DatasetGenerator:
 
         return False, None
 
-    def _batch_verify_with_model(self, candidates: List[Dict], language: str, batch_size: int = None, single_verify: bool = False) -> List[Dict]:
+    def _batch_verify_with_model(self, candidates: List[Dict], language: str, batch_size: Optional[int] = None, single_verify: bool = False) -> List[Dict]:
         """Verify candidates using model in batches"""
         if batch_size is None:
             batch_size = BATCH_SIZE

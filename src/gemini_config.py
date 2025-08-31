@@ -11,7 +11,7 @@ if config_file.exists():
         config = json.load(f)
     
     API_KEYS = config.get("API_KEYS", [])
-    MODELS = config.get("DEFAULT_MODELS", ["models/gemini-2.5-pro", "models/gemini-2.5-flash", "models/gemini-2.5-flash-lite"])
+    MODELS = config.get("DEFAULT_MODELS", ["models/gemini-2.0-flash", "models/gemini-2.0-pro", "models/gemini-2.5-flash-lite", "models/gemini-2.5-pro", "models/gemini-2.5-flash"])
     SINGLE_MODEL_FALLBACK = config.get("SINGLE_MODEL_FALLBACK")
     MAX_FABRICATION_RATE = config.get("MAX_FABRICATION_RATE", 0.10)
     BATCH_SIZE = config.get("BATCH_SIZE", 4)
@@ -30,7 +30,7 @@ else:
         os.getenv("GEMINI_KEY_4")
     ]
     API_KEYS = [key for key in API_KEYS if key]
-    MODELS = ["models/gemini-2.5-pro", "models/gemini-2.5-flash", "models/gemini-2.5-flash-lite"]
+    MODELS = ["models/gemini-2.0-flash", "models/gemini-2.0-pro", "models/gemini-2.5-flash-lite", "models/gemini-2.5-pro", "models/gemini-2.5-flash"]
     SINGLE_MODEL_FALLBACK = os.getenv("SINGLE_MODEL_FALLBACK")
     MAX_FABRICATION_RATE = float(os.getenv("MAX_FABRICATION_RATE", "0.10"))
     BATCH_SIZE = int(os.getenv("BATCH_SIZE", "4"))

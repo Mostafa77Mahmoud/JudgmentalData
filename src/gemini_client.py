@@ -5,7 +5,8 @@ import json
 import logging
 import os
 import threading
-from typing import List, Dict, Optional, Tuple, Any
+import re
+from typing import List, Dict, Optional, Tuple, Any, Union
 from pathlib import Path
 from google import genai
 from google.genai import types
@@ -23,7 +24,7 @@ class NoTextPartsError(Exception):
     """Raised when no textual parts found in API response"""
     pass
 
-def save_raw_response(response_obj, model_name="unknown_model", attempt: int = 0) -> str:
+def save_raw_response(response_obj: Any, model_name: str = "unknown_model", attempt: int = 0) -> str:
     """Save raw API response with better serialization"""
     os.makedirs("raw", exist_ok=True)
     ts = int(time.time() * 1000)
@@ -36,18 +37,36 @@ def save_raw_response(response_obj, model_name="unknown_model", attempt: int = 0
             if hasattr(response_obj, 'text'):
                 response_data = {
                     "text": response_obj.text,
-                    "candidates": [
-                        {
-                            "content": {"parts": [{"text": part.text}] for part in candidate.content.parts if hasattr(part, 'text')},
-                            "finish_reason": candidate.finish_reason.name if hasattr(candidate, 'finish_reason') else "UNKNOWN"
-                        } for candidate in response_obj.candidates
-                    ],
-                    "usage_metadata": {
-                        "prompt_token_count": response_obj.usage_metadata.prompt_token_count if hasattr(response_obj, 'usage_metadata') else 0,
-                        "candidates_token_count": response_obj.usage_metadata.candidates_token_count if hasattr(response_obj, 'usage_metadata') else 0,
-                        "total_token_count": response_obj.usage_metadata.total_token_count if hasattr(response_obj, 'usage_metadata') else 0
-                    }
+                    "candidates": [],
+                    "usage_metadata": {}
                 }
+                
+                # Extract candidates if available
+                if hasattr(response_obj, 'candidates') and response_obj.candidates:
+                    for candidate in response_obj.candidates:
+                        candidate_data = {
+                            "content": {"parts": []},
+                            "finish_reason": "UNKNOWN"
+                        }
+                        
+                        if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                            for part in candidate.content.parts:
+                                if hasattr(part, 'text'):
+                                    candidate_data["content"]["parts"].append({"text": part.text})
+                        
+                        if hasattr(candidate, 'finish_reason'):
+                            candidate_data["finish_reason"] = candidate.finish_reason.name if hasattr(candidate.finish_reason, 'name') else str(candidate.finish_reason)
+                        
+                        response_data["candidates"].append(candidate_data)
+                
+                # Extract usage metadata if available
+                if hasattr(response_obj, 'usage_metadata'):
+                    usage = response_obj.usage_metadata
+                    response_data["usage_metadata"] = {
+                        "prompt_token_count": getattr(usage, 'prompt_token_count', 0),
+                        "candidates_token_count": getattr(usage, 'candidates_token_count', 0),
+                        "total_token_count": getattr(usage, 'total_token_count', 0)
+                    }
             else:
                 response_data = {"error": "No text attribute", "raw": str(response_obj)}
             
@@ -95,13 +114,14 @@ def send_verify_request(model_name: str, api_key: str, prompt_text: str, max_tok
         # Check if response has text
         if not hasattr(response, 'text') or not response.text:
             # Check finish reason
-            if response.candidates and len(response.candidates) > 0:
+            if hasattr(response, 'candidates') and response.candidates and len(response.candidates) > 0:
                 candidate = response.candidates[0]
                 if hasattr(candidate, 'finish_reason'):
-                    if candidate.finish_reason.name == "MAX_TOKENS":
+                    finish_reason_name = candidate.finish_reason.name if hasattr(candidate.finish_reason, 'name') else str(candidate.finish_reason)
+                    if finish_reason_name == "MAX_TOKENS":
                         raise ValueError(f"Response truncated due to MAX_TOKENS. Increase max_output_tokens. Raw saved to {raw_path}")
-                    elif candidate.finish_reason.name in ["SAFETY", "OTHER"]:
-                        raise ValueError(f"Response blocked due to {candidate.finish_reason.name}. Raw saved to {raw_path}")
+                    elif finish_reason_name in ["SAFETY", "OTHER"]:
+                        raise ValueError(f"Response blocked due to {finish_reason_name}. Raw saved to {raw_path}")
             
             raise NoTextPartsError(f"No text parts found in response. Raw saved to {raw_path}")
         
@@ -177,7 +197,7 @@ def robust_parse_json_array(text: str) -> Optional[List[Dict]]:
     logger.error(f"Failed to parse JSON from response: {text[:200]}")
     return None
 
-def create_manual_review_item(candidate_id: str, claim: str, chunk_excerpt: str, raw_path: str, model: str, key_index: int, error: str):
+def create_manual_review_item(candidate_id: str, claim: str, chunk_excerpt: str, raw_path: str, model: str, key_index: int, error: str) -> str:
     """Create manual review item for failed candidates"""
     review_item = {
         "candidate_id": candidate_id,
@@ -315,16 +335,16 @@ def batch_verify_single(items: List[Dict]) -> List[Dict]:
         results.extend(single_result)
     return results
 
-# Legacy GeminiClient class for backward compatibility
+# Production-ready GeminiClient class
 class GeminiClient:
-    """Legacy wrapper using new Google GenAI SDK"""
+    """Production-ready Gemini client with load balancing and failover"""
 
     def __init__(self, config_file: str):
         self.logger = logging.getLogger(__name__)
         self.lock = threading.Lock()
         self.api_keys = API_KEYS
         self.current_key_index = 0
-        self.key_states = {i: {"blocked_until": 0, "requests_made": 0}
+        self.key_states = {i: {"blocked_until": 0.0, "requests_made": 0}
                           for i in range(len(self.api_keys))}
         Path("raw").mkdir(exist_ok=True)
 
@@ -344,12 +364,18 @@ class GeminiClient:
     def _block_key(self, key_index: int, duration: int = 300):
         """Block a key for specified duration"""
         with self.lock:
-            self.key_states[key_index]["blocked_until"] = time.time() + duration
+            self.key_states[key_index]["blocked_until"] = float(time.time() + duration)
             self.logger.warning(f"Blocked key {key_index} for {duration}s")
 
-    def call_model(self, prompt: str, model: str = "models/gemini-2.5-flash", max_tokens: int = 8192,
+    def call_model(self, prompt: str, model: str = "models/gemini-2.0-flash", max_tokens: int = 8192,
                    temperature: float = 0.0, max_attempts: int = 3) -> Dict:
-        """Call Gemini model using new SDK"""
+        """Call Gemini model using new SDK with multiple model support"""
+        
+        # Validate model name
+        supported_models = ["models/gemini-2.0-flash", "models/gemini-2.0-pro", "models/gemini-2.5-flash-lite"]
+        if model not in supported_models:
+            self.logger.warning(f"Model {model} not in supported list, using gemini-2.0-flash")
+            model = "models/gemini-2.0-flash"
         
         for attempt in range(max_attempts):
             key, key_index = self._get_next_available_key()
@@ -392,10 +418,14 @@ class GeminiClient:
             except Exception as e:
                 self.logger.error(f"Error with key {key_index}, attempt {attempt + 1}: {e}")
                 
-                if "quota" in str(e).lower() or "exhausted" in str(e).lower():
-                    self._block_key(key_index, 300)
-                elif "rate" in str(e).lower():
-                    self._block_key(key_index, 60)
+                # Handle different error types
+                error_str = str(e).lower()
+                if "quota" in error_str or "exhausted" in error_str:
+                    self._block_key(key_index, 300)  # Block for 5 minutes
+                elif "rate" in error_str or "limit" in error_str:
+                    self._block_key(key_index, 60)   # Block for 1 minute
+                elif "safety" in error_str:
+                    self.logger.warning(f"Safety filter triggered for model {model}")
                 
                 if attempt < max_attempts - 1:
                     wait_time = backoff_with_jitter(attempt)
@@ -404,3 +434,35 @@ class GeminiClient:
                     return {"success": False, "error": str(e), "raw_text": ""}
 
         return {"success": False, "error": "Max attempts exceeded", "raw_text": ""}
+
+    def generate_with_thinking(self, prompt: str, model: str = "models/gemini-2.0-flash", 
+                              disable_thinking: bool = False) -> Dict:
+        """Generate content with optional thinking mode (for 2.5 models)"""
+        
+        config_params = {
+            "temperature": 0.0,
+            "max_output_tokens": 8192,
+        }
+        
+        # Disable thinking for 2.5 Flash if requested
+        if "2.5" in model and disable_thinking:
+            config_params["thinking_config"] = types.ThinkingConfig(
+                include_thinking=False
+            )
+        
+        return self.call_model(prompt, model, **config_params)
+
+    def get_key_status(self) -> Dict:
+        """Get status of all API keys"""
+        with self.lock:
+            current_time = time.time()
+            status = {}
+            for i, key in enumerate(self.api_keys):
+                masked_key = key[:8] + "..." + key[-4:] if len(key) > 12 else "***"
+                status[f"key_{i}"] = {
+                    "masked_key": masked_key,
+                    "available": self.key_states[i]["blocked_until"] <= current_time,
+                    "blocked_until": self.key_states[i]["blocked_until"],
+                    "requests_made": self.key_states[i]["requests_made"]
+                }
+            return status
