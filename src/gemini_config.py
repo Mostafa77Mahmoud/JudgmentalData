@@ -17,6 +17,9 @@ if config_file.exists():
     BATCH_SIZE = config.get("BATCH_SIZE", 4)
     CONTEXT_MAX_CHARS = config.get("CONTEXT_MAX_CHARS", 2500)
     MAX_OUTPUT_TOKENS = config.get("MAX_OUTPUT_TOKENS", 512)
+    MAX_RETRIES = config.get("MAX_RETRIES", 5)
+    VERIFIER_MODEL = config.get("VERIFIER_MODEL", "models/gemini-2.5-pro")
+    VERIFIER_TEMPERATURE = config.get("VERIFIER_TEMPERATURE", 0.0)
 else:
     # Fallback to environment variables
     API_KEYS = [
@@ -33,6 +36,9 @@ else:
     BATCH_SIZE = int(os.getenv("BATCH_SIZE", "4"))
     CONTEXT_MAX_CHARS = int(os.getenv("CONTEXT_MAX_CHARS", "2500"))
     MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "512"))
+    MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
+    VERIFIER_MODEL = os.getenv("VERIFIER_MODEL", "models/gemini-2.5-pro")
+    VERIFIER_TEMPERATURE = float(os.getenv("VERIFIER_TEMPERATURE", "0.0"))
 
 # Use single model fallback if specified
 if SINGLE_MODEL_FALLBACK:
