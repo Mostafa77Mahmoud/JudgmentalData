@@ -1,4 +1,3 @@
-
 import json
 import uuid
 import time
@@ -99,16 +98,16 @@ class DatasetGenerator:
 
     def _build_generation_prompt(self, context_chunks: List[Dict], language: str, target_count: int = 8) -> str:
         """Build prompt for generating judgmental examples using context chunks"""
-        
+
         # Prepare context text from chunks
         context_text = ""
         chunk_refs = []
-        
+
         for i, chunk in enumerate(context_chunks[:5]):  # Use first 5 chunks
             chunk_text = chunk.get("text", "")[:800]  # Limit each chunk
             context_text += f"\n--- Chunk {i+1} ---\n{chunk_text}\n"
             chunk_refs.append({"id": i+1, "original_id": chunk.get("id", f"chunk_{i}")})
-        
+
         if language == "ar":
             # Reduce target count to prevent truncation
             actual_target = min(target_count, 5)
@@ -177,19 +176,19 @@ Return ONLY valid JSON without any additional text:
   }}
 ]
 """
-        
+
         return prompt.strip()
 
     def _generate_with_model(self, chunks: List[Dict], language: str, target_count: int = 20) -> List[Dict]:
         """Generate examples using Gemini model"""
-        
+
         prompt = self._build_generation_prompt(chunks, language, target_count)
-        
+
         max_attempts = 3
         for attempt in range(max_attempts):
             try:
                 self.logger.info(f"Generating examples with model, attempt {attempt + 1}")
-                
+
                 result = self.gemini_client.call_model(
                     prompt=prompt,
                     model="gemini-2.5-flash",
@@ -197,23 +196,23 @@ Return ONLY valid JSON without any additional text:
                     temperature=0.3,
                     auto_retry_truncation=True
                 )
-                
+
                 if not result["success"]:
                     self.logger.error(f"Model call failed: {result.get('error', 'Unknown error')}")
                     continue
-                
+
                 # Parse the JSON response
                 examples = robust_parse_json_array(result["raw_text"])
                 if not examples:
                     self.logger.error(f"Failed to parse JSON from model response")
                     continue
-                
+
                 # Post-process examples
                 processed_examples = []
                 for i, ex in enumerate(examples):
                     if not isinstance(ex, dict):
                         continue
-                    
+
                     # Ensure required fields
                     if "id" not in ex:
                         ex["id"] = str(uuid.uuid4())
@@ -227,32 +226,32 @@ Return ONLY valid JSON without any additional text:
                         ex["suspected_fabrication"] = False
                     if "meta" not in ex:
                         ex["meta"] = {"confidence": 0.8}
-                    
+
                     # Validate and limit context excerpt
                     if "context_excerpt" in ex and len(ex["context_excerpt"]) > self.context_max_chars:
                         ex["context_excerpt"] = ex["context_excerpt"][:self.context_max_chars]
-                    
+
                     processed_examples.append(ex)
-                
+
                 self.logger.info(f"Generated {len(processed_examples)} examples")
                 return processed_examples
-                
+
             except Exception as e:
                 self.logger.error(f"Generation attempt {attempt + 1} failed: {e}")
                 if attempt == max_attempts - 1:
                     raise
                 time.sleep(2 ** attempt)  # Exponential backoff
-        
+
         return []
 
     def _batch_verify_examples(self, examples: List[Dict], language: str) -> List[Dict]:
         """Verify examples using Gemini model in batches"""
-        
+
         if not examples:
             return []
-        
+
         self.logger.info(f"Verifying {len(examples)} examples with model")
-        
+
         # Prepare verification items
         verification_items = []
         for ex in examples:
@@ -263,17 +262,17 @@ Return ONLY valid JSON without any additional text:
                 "language": language,
                 "context_chunk_id": ex.get("context_chunk_id", 0)
             })
-        
+
         # Use batch verification
         try:
             verified_results = batch_verify(verification_items)
         except Exception as e:
             self.logger.error(f"Batch verification failed, falling back to single verification: {e}")
             verified_results = batch_verify_single(verification_items)
-        
+
         # Apply verification results back to examples
         result_map = {v["id"]: v for v in verified_results}
-        
+
         final_examples = []
         for ex in examples:
             ex_id = ex["id"]
@@ -301,9 +300,9 @@ Return ONLY valid JSON without any additional text:
                         "verification_failed": True
                     }
                 })
-            
+
             final_examples.append(ex)
-        
+
         return final_examples
 
     def _save_progress(self, language: str, examples: List[Dict], seed_index: int):
@@ -364,7 +363,7 @@ Return ONLY valid JSON without any additional text:
         self.logger.info(f"Starting smoke test for {language} with {target_count} examples (Gemini only)")
 
         chunks = self.processor.arabic_chunks if language == "ar" else self.processor.english_chunks
-        
+
         if not chunks or len(chunks) == 0:
             raise ValueError(f"No chunks data available for language {language}")
 
@@ -373,7 +372,7 @@ Return ONLY valid JSON without any additional text:
 
         # Generate examples using model
         examples = self._generate_with_model(sample_chunks, language, target_count)
-        
+
         if not examples:
             raise RuntimeError("Failed to generate any examples")
 
@@ -383,7 +382,7 @@ Return ONLY valid JSON without any additional text:
         # Filter valid examples
         valid_examples = []
         failed_raw_paths = []
-        
+
         for ex in verified_examples:
             is_valid, reason = validate_example_schema(ex, self.required_fields)
             if is_valid:
@@ -445,14 +444,14 @@ Return ONLY valid JSON without any additional text:
         while len(all_examples) < target and processed_chunks < len(chunks):
             # Select chunk batch
             chunk_batch = chunks[processed_chunks:processed_chunks + chunk_batch_size]
-            
+
             # Generate examples for this batch
             batch_examples = self._generate_with_model(chunk_batch, language, examples_per_batch)
-            
+
             if batch_examples:
                 # Verify examples
                 verified_batch = self._batch_verify_examples(batch_examples, language)
-                
+
                 # Add valid examples
                 for ex in verified_batch:
                     is_valid, _ = validate_example_schema(ex, self.required_fields)
@@ -489,6 +488,152 @@ Return ONLY valid JSON without any additional text:
             "output_file": output_file,
             "method": "gemini_only"
         }
+
+    def _save_smoke_test_results(self, claims: List[Dict], language: str):
+        """Save smoke test results to a JSONL file"""
+        output_file = f"data/generation_stage_B/{language}/smoke_test_results_{language}_{len(claims)}.jsonl"
+        with open(output_file, "w", encoding="utf-8") as f:
+            for claim in claims:
+                f.write(json.dumps(claim, ensure_ascii=False) + "\n")
+        self.logger.info(f"Saved smoke test results to: {output_file}")
+
+    def _calculate_stats(self, claims: List[Dict]) -> Dict:
+        """Calculate statistics for generated claims"""
+        total = len(claims)
+        true_count = sum(1 for claim in claims if claim.get("verdict") == "True")
+        false_count = sum(1 for claim in claims if claim.get("verdict") == "False")
+        unknown_count = sum(1 for claim in claims if claim.get("verdict") == "Unknown")
+        fabrication_count = sum(1 for claim in claims if claim.get("suspected_fabrication"))
+
+        return {
+            "total": total,
+            "true": true_count,
+            "false": false_count,
+            "unknown": unknown_count,
+            "fabrications": fabrication_count,
+            "fabrication_rate": fabrication_count / total if total > 0 else 0.0,
+        }
+
+    def _generate_uuid(self) -> str:
+        """Generate a unique UUID for claims"""
+        return str(uuid.uuid4())
+
+    def run_smoke_test(self, language: str = "ar", target_count: int = 15) -> Dict:
+        """Run smoke test using only Gemini models"""
+        self.logger.info(f"Starting smoke test for {language} with {target_count} examples (Gemini only)")
+
+        chunks = self.processor.arabic_chunks if language == "ar" else self.processor.english_chunks
+
+        if not chunks or len(chunks) == 0:
+            raise ValueError(f"No chunks data available for language {language}")
+
+        # Select random chunks for context
+        sample_chunks = random.sample(chunks, min(10, len(chunks)))
+
+        # Generate examples using model
+        examples = self._generate_with_model(sample_chunks, language, target_count)
+
+        if not examples:
+            raise RuntimeError("Failed to generate any examples")
+
+        # Verify examples using model
+        verified_examples = self._batch_verify_examples(examples, language)
+
+        # Filter valid examples
+        valid_examples = []
+        failed_raw_paths = []
+
+        for ex in verified_examples:
+            is_valid, reason = validate_example_schema(ex, self.required_fields)
+            if is_valid:
+                valid_examples.append(ex)
+            else:
+                self.logger.warning(f"Invalid example: {reason}")
+                if "raw_response_path" in ex:
+                    failed_raw_paths.append(ex["raw_response_path"])
+
+        # Apply fabrication post-processing
+        from .fabrication_checker import FabricationChecker
+        fab_checker = FabricationChecker(max_fabrication_rate=0.10)
+        final_claims = fab_checker.post_process_results(verified_examples)
+        quality_report = fab_checker.generate_quality_report(final_claims)
+
+        # Log quality metrics
+        logger.info(f"Smoke Test Quality Report: {quality_report}")
+
+        # Save results
+        self._save_smoke_test_results(final_claims, language)
+
+        return {
+            'success': True,
+            'generated': len(final_claims),
+            'stats': self._calculate_stats(final_claims),
+            'quality_report': quality_report,
+            'samples': final_claims[:3] if final_claims else []
+        }
+
+    def _generate_claims_from_chunk(self, chunk, language, max_claims=3):
+        """Generate claims from a single chunk of text."""
+        try:
+            # Get the appropriate prompt - strict mode
+            if language == "ar":
+                prompt = ARABIC_GENERATOR_PROMPT.format(
+                    context=chunk.get('text', ''),
+                    chunk_id=chunk.get('id', 0),
+                    uuid=self._generate_uuid()
+                )
+            else:
+                prompt = ENGLISH_GENERATOR_PROMPT.format(
+                    context=chunk.get('text', ''), 
+                    chunk_id=chunk.get('id', 0),
+                    uuid=self._generate_uuid()
+                )
+
+            response = self.client.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": 0.0,
+                    "top_p": 0.0,
+                    "max_output_tokens": 12000
+                }
+            )
+            
+            if not response or not response.text:
+                self.logger.warning(f"Empty response received for chunk {chunk.get('id', 0)}")
+                return []
+
+            # Parse the response
+            claims = robust_parse_json_array(response.text)
+            
+            # Ensure claims conform to expected structure and add metadata
+            processed_claims = []
+            for claim in claims:
+                if not isinstance(claim, dict):
+                    continue
+
+                # Add default values if missing
+                claim.setdefault("id", self._generate_uuid())
+                claim.setdefault("language", language)
+                claim.setdefault("context_chunk_id", chunk.get('id', 0))
+                claim.setdefault("generator_model", "gemini-2.5-flash")
+                claim.setdefault("suspected_fabrication", False)
+                claim.setdefault("meta", {"confidence": 0.8, "chunk_source": "context"})
+
+                # Truncate context excerpt if too long
+                if "context_excerpt" in claim and len(claim["context_excerpt"]) > self.context_max_chars:
+                    claim["context_excerpt"] = claim["context_excerpt"][:self.context_max_chars]
+
+                # Limit the number of claims generated per chunk
+                if len(processed_claims) < max_claims:
+                    processed_claims.append(claim)
+                else:
+                    break # Stop if max_claims is reached
+
+            return processed_claims
+
+        except Exception as e:
+            self.logger.error(f"Error generating claims from chunk {chunk.get('id', 0)}: {e}")
+            return []
 
 
 def main():

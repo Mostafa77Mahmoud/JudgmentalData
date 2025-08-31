@@ -1,9 +1,8 @@
-
 def extract_text_from_response(response) -> str:
     """Extract text from various response formats"""
     if not response:
         return ""
-    
+
     # Handle dict response (from JSON API)
     if isinstance(response, dict):
         if "candidates" in response:
@@ -18,14 +17,14 @@ def extract_text_from_response(response) -> str:
                     elif isinstance(content, dict) and "text" in content:
                         texts.append(content["text"])
             return "".join(texts)
-        
+
         if "output" in response:
             output = response["output"]
             if isinstance(output, list):
                 return "".join([p.get("text", "") for p in output if isinstance(p, dict)])
             elif isinstance(output, dict) and "text" in output:
                 return output["text"]
-    
+
     # Handle SDK response object
     if hasattr(response, 'candidates') and response.candidates:
         texts = []
@@ -36,11 +35,11 @@ def extract_text_from_response(response) -> str:
                         if hasattr(part, 'text') and part.text:
                             texts.append(part.text)
         return "".join(texts)
-    
+
     # Fallback to response.text if available
     if hasattr(response, 'text'):
         return response.text
-    
+
     return str(response)
 
 
@@ -618,12 +617,29 @@ class GeminiClient:
                 time.time()) + duration
             self.logger.warning(f"Blocked key {key_index} for {duration}s")
 
-    def _save_raw_response(self, response_obj: Any, prompt: str, attempt: int) -> str:
-        """Helper to save raw response, similar to save_raw_response but specific to call_model"""
-        # Extract model name from prompt or default
-        model_name_match = re.search(r'gemini-\d\.\d-[a-zA-Z-]+', prompt)
-        model_name = model_name_match.group(0) if model_name_match else "unknown_model"
-        return save_raw_response(response_obj, model_name, attempt)
+    def _save_raw_response(self, response_data: Dict, model_name: str, attempt: int) -> str:
+        """Save raw response for analysis"""
+        timestamp = int(time.time() * 1000)
+        filename = f"raw/{timestamp}_{model_name.replace('/', '_')}_att{attempt}.resp.json"
+
+        # Ensure raw directory exists
+        Path("raw").mkdir(exist_ok=True)
+
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(response_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.logger.error(f"Failed to save raw response to {filename}: {e}")
+            # Try saving as text if JSON fails
+            try:
+                with open(filename.replace('.json', '.txt'), 'w', encoding='utf-8') as f:
+                    f.write(str(response_data))
+                filename = filename.replace('.json', '.txt')
+            except Exception as e_txt:
+                self.logger.error(f"Failed to save raw response as text to {filename.replace('.json', '.txt')}: {e_txt}")
+
+
+        return filename
 
     def call_model(self,
                    prompt: str,
@@ -702,14 +718,15 @@ class GeminiClient:
                             if max_tokens < MAX_OUTPUT_TOKENS:
                                 new_max_tokens = min(MAX_OUTPUT_TOKENS, max_tokens * 2)
                                 self.logger.info(f"Truncated - increasing max_output_tokens from {max_tokens} to {new_max_tokens}")
+                                # Use the current key and retry with increased tokens
                                 return self.call_model(prompt, model, new_max_tokens, temperature, max_attempts, auto_retry_truncation)
                             else:
                                 self.logger.warning("Truncated even at maximum allowed tokens - consider splitting request")
-                        
+
                         error_msg = f"Model finished with reason: {finish_reason}. Response may be incomplete or blocked."
                         self.logger.warning(error_msg)
                         raw_path = self._save_raw_response(response, prompt, attempt)
-                        
+
                         # If it's truncation, still return partial content if available
                         if "MAX_TOKENS" in str(finish_reason).upper():
                             # Try to extract partial content
@@ -747,6 +764,17 @@ class GeminiClient:
             except Exception as e:
                 self.logger.error(
                     f"Error with key {key_index}, attempt {attempt + 1}: {e}")
+
+                # Save error details for analysis
+                error_data = {
+                    "error": str(e),
+                    "model": model,
+                    "prompt": prompt[:200] + "...", # Log truncated prompt
+                    "attempt": attempt,
+                    "timestamp": time.time(),
+                    "key_index": key_index
+                }
+                self._save_raw_response(error_data, f"error_{attempt}", attempt)
 
                 # Handle different error types
                 error_str = str(e).lower()
