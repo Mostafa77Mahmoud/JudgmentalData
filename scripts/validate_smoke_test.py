@@ -9,7 +9,7 @@ from typing import Dict, List
 def validate_smoke_test(lang: str, count: int) -> Dict:
     """Validate smoke test results"""
     
-    # Check for smoke test output file
+    # Check for smoke test output file  
     output_files = list(Path(f"data/generation_stage_B/{lang}").glob(f"smoke_test_{lang}_*.jsonl"))
     if not output_files:
         return {"success": False, "error": "No smoke test output files found"}

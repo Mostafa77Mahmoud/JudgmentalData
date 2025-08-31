@@ -56,7 +56,7 @@ def initialize_system():
                     api_keys.extend(keys_data.values())
                 else:
                     st.warning("Unexpected format in keys.json. API keys might not be loaded correctly.")
-        
+
         # Fallback to environment variables if config file is missing or empty
         if not api_keys:
             api_keys = [
@@ -328,7 +328,7 @@ def system_status_page():
             "Status": "✅ Set",
             "Value": f"{key[:10]}..." if key else "Not set"
         })
-    
+
     # Display environment variables
     for key_name, key_value in env_keys:
         status = "✅ Set" if key_value else "❌ Missing"
