@@ -148,74 +148,100 @@ def extract_text(response):
     return "\n".join(texts) if texts else None
 
 
-def send_verify_request(model_name: str, api_key: str, prompt_text: str,
-                        max_tokens: int, attempt: int) -> str:
-    """Send verification request using Google Generative AI SDK"""
+def _verify_schema():
+    """JSON Schema for structured verification output"""
+    return {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "id": {"type": "string"},
+                "verdict": {"type": "string", "enum": ["True", "False", "Unknown"]},
+                "explanation": {"type": "string", "maxLength": 200},
+                "reference": {"type": "string", "maxLength": 300}
+            },
+            "required": ["id", "verdict", "explanation", "reference"]
+        }
+    }
+
+def _build_verify_prompt(items: List[Dict], lang: str) -> str:
+    """Build concise verification prompt"""
+    if lang == "ar":
+        return (
+            "تحقق من الادعاءات التالية اعتمادًا على المقتطفات المرفقة فقط.\n"
+            "أعد فقط JSON صالح (بدون أي نص إضافي). كل عنصر يجب أن يحتوي:\n"
+            "id، verdict (True/False/Unknown)، explanation (≤ 200 حرف، موجز جدًا)، reference.\n"
+            "لا تُضِف مقدمات أو تعليقات.\n\n"
+            + json.dumps(items, ensure_ascii=False)
+        )
+    else:
+        return (
+            "Verify the following claims strictly using the provided excerpts only.\n"
+            "Return ONLY valid JSON (no extra text). Each item must have:\n"
+            "id, verdict (True/False/Unknown), explanation (≤ 200 chars, very concise), reference.\n"
+            "No preface or commentary.\n\n"
+            + json.dumps(items, ensure_ascii=False)
+        )
+
+def send_verify_request(model_name: str, api_key: str, items: List[Dict], lang: str, attempt: int) -> List[Dict]:
+    """Send structured verification request using Google Generative AI SDK"""
     try:
-        # Validate token limits before making request
-        is_valid, validation_msg = validate_token_limits(prompt_text, max_tokens)
-        if not is_valid:
-            raise ValueError(f"Token validation failed: {validation_msg}")
-        
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name)
 
-        # Strict config for verification - JSON responses should be small
+        # Structured output with very strict limits
         generation_config = genai.GenerationConfig(
             temperature=0.0,
-            max_output_tokens=2000,  # Verification needs small JSON, not 40k
-            response_mime_type="application/json")
+            max_output_tokens=1200,  # كافي لـ 5 عناصر مع شرح قصير
+            response_mime_type="application/json",
+            response_schema=_verify_schema())
 
-        response = model.generate_content(prompt_text,
-                                          generation_config=generation_config)
+        prompt_text = _build_verify_prompt(items, lang)
+        response = model.generate_content(prompt_text, generation_config=generation_config)
 
         # Save raw response for debugging
         raw_path = save_raw_response(response, f"verify_{model_name}", attempt)
 
-        # Extract text properly from response
-        result = extract_text(response)
-        if not result:
-            # Check finish reason for better error handling
-            if hasattr(response, 'candidates') and response.candidates and len(
-                    response.candidates) > 0:
+        # Check finish reason first
+        if hasattr(response, 'candidates') and response.candidates:
+            candidate = response.candidates[0]
+            if hasattr(candidate, 'finish_reason'):
+                finish_reason = candidate.finish_reason
+                finish_reason_name = finish_reason.name if hasattr(finish_reason, 'name') else str(finish_reason)
+                
+                if finish_reason_name == "MAX_TOKENS" or finish_reason == 2:
+                    raise RuntimeError(f"Verification truncated due to MAX_TOKENS. Raw saved to {raw_path}")
+                elif finish_reason in [3, 4] or finish_reason_name in ["SAFETY", "RECITATION"]:
+                    raise RuntimeError(f"Response blocked due to safety/recitation. Raw saved to {raw_path}")
+
+        # Extract structured JSON response
+        text = None
+        try:
+            text = response.text
+        except Exception:
+            # Fallback extraction
+            if hasattr(response, 'candidates') and response.candidates:
                 candidate = response.candidates[0]
-                if hasattr(candidate, 'finish_reason'):
-                    finish_reason_name = candidate.finish_reason.name if hasattr(
-                        candidate.finish_reason, 'name') else str(
-                            candidate.finish_reason)
-                    if finish_reason_name == "MAX_TOKENS":
-                        raise ValueError(
-                            f"Response truncated due to MAX_TOKENS. Increase max_output_tokens. Raw saved to {raw_path}"
-                        )
-                    elif finish_reason_name == "STOP":
-                        raise ValueError(
-                            f"Response completed but no text parts found. Raw saved to {raw_path}"
-                        )
+                if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                    texts = []
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'text') and part.text:
+                            texts.append(part.text)
+                    text = "".join(texts).strip()
 
-            raise ValueError(
-                f"Empty response or no text parts. Raw saved to {raw_path}")
+        if not text:
+            raise RuntimeError(f"Empty verification response. Raw saved to {raw_path}")
 
-        # Check finish reason
-        if response.candidates and response.candidates[0].finish_reason:
-            finish_reason = response.candidates[0].finish_reason
-            if finish_reason == 2:  # MAX_TOKENS
-                # Try to extract partial text first
-                partial_text = extract_text(response)
-                if partial_text and len(
-                        partial_text) > 100:  # If we got some reasonable text
-                    logger.warning(
-                        f"Response truncated but got partial text ({len(partial_text)} chars)"
-                    )
-                    return partial_text
-                raise ValueError(
-                    f"Response truncated due to MAX_TOKENS. Increase max_output_tokens. Raw saved to {raw_path}"
-                )
-            elif finish_reason in [3, 4]:  # SAFETY, RECITATION
-                raise ValueError(
-                    f"Response blocked due to safety/recitation (reason: {finish_reason}). Raw saved to {raw_path}"
-                )
-
-        return result
+        # Parse structured JSON
+        try:
+            data = json.loads(text)
+            if not isinstance(data, list):
+                raise ValueError("Verifier returned non-array JSON")
+            return data
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON from verifier: {e}\nRaw: {text[:500]}")
+            raise RuntimeError(f"Invalid JSON from verifier. Raw saved to {raw_path}")
 
     except Exception as e:
         # Save error details
@@ -367,131 +393,109 @@ Output format - ONLY JSON array, no markdown blocks:
 
 
 def prepare_verifier_request(items: List[Dict], max_tokens: int) -> str:
-    """Prepare verification request with language-specific prompts"""
-    # Detect language from first item
+    """Prepare verification request with language-specific prompts - DEPRECATED"""
+    # This function is now deprecated as we use structured output
     language = items[0].get("language", "en") if items else "en"
+    return _build_verify_prompt(items, language)
 
-    try:
-        from src.prompts import ARABIC_VERIFIER_PROMPT, ENGLISH_VERIFIER_PROMPT
-        if language == "ar":
-            base_prompt = ARABIC_VERIFIER_PROMPT
-        else:
-            base_prompt = ENGLISH_VERIFIER_PROMPT
-    except ImportError:
-        # Fallback to default prompt
-        base_prompt = VERIFIER_PROMPT
 
-    return base_prompt + "\n\nINPUT_ITEMS:\n" + json.dumps(items,
-                                                           ensure_ascii=False)
-
+def chunked(lst, n):
+    """Split list into chunks of size n"""
+    for i in range(0, len(lst), n):
+        yield lst[i:i+n]
 
 def batch_verify(items: List[Dict]) -> List[Dict]:
-    """Batch verify items using Google Generative AI SDK"""
-    assert len(items) <= BATCH_SIZE, f"batch size must be <= {BATCH_SIZE}"
+    """Batch verify items using structured output with 5-item chunks"""
+    if not items:
+        return []
 
     # Ensure truncation
     for item in items:
-        item["context_excerpt"] = item.get("context_excerpt",
-                                           "")[:CONTEXT_MAX_CHARS]
+        item["context_excerpt"] = item.get("context_excerpt", "")[:CONTEXT_MAX_CHARS]
 
-    # Calculate tokens conservatively based on language
     language = items[0].get("language", "en") if items else "en"
-    est_tokens_per_item = 800 if language == "ar" else 400  # Arabic needs more tokens
-
-    # Use small max tokens for verification - JSON responses should be concise
-    max_tokens = 2000  # Fixed limit for verification responses
     
-    # Ensure we don't exceed input token limits
-    estimated_input_tokens = len(json.dumps(items, ensure_ascii=False)) // 3  # Rough estimate
-    if estimated_input_tokens > MAX_INPUT_TOKENS:
-        logger.warning(f"Input tokens ({estimated_input_tokens}) may exceed limit ({MAX_INPUT_TOKENS})")
-
+    # Split into small chunks of 5 items to prevent MAX_TOKENS
+    ITEMS_PER_CALL = 5
+    all_results = []
     last_err = None
-    last_raw_path = None
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        api_key = rotate_key(attempt - 1)
-        key_index = (attempt - 1) % len(API_KEYS)
+    for chunk in chunked(items, ITEMS_PER_CALL):
+        for attempt in range(1, MAX_RETRIES + 1):
+            api_key = rotate_key(attempt - 1)
+            
+            try:
+                # Prepare verification items (minimal structure)
+                verify_items = []
+                for item in chunk:
+                    verify_items.append({
+                        "id": item["id"],
+                        "claim": item["claim"],
+                        "context_excerpt": item["context_excerpt"]
+                    })
 
-        try:
-            prompt_text = prepare_verifier_request(items, max_tokens)
-            resp_text = send_verify_request(VERIFIER_MODEL, api_key,
-                                            prompt_text, max_tokens, attempt)
-
-            parsed = robust_parse_json_array(resp_text)
-            if parsed is None:
-                raise ValueError("Failed to parse JSON response")
-
-            if len(parsed) != len(items):
-                if isinstance(parsed,
-                              list) and len(parsed) == 1 and len(items) == 1:
-                    # Single item case
-                    pass
-                elif len(parsed) == 0:
-                    raise ValueError("Empty response array")
+                verified = send_verify_request(VERIFIER_MODEL, api_key, verify_items, language, attempt)
+                
+                # Map results back to original structure
+                result_map = {v["id"]: v for v in verified}
+                for item in chunk:
+                    item_id = item["id"]
+                    if item_id in result_map:
+                        v = result_map[item_id]
+                        result = {
+                            **item,
+                            "verdict": v["verdict"],
+                            "explanation": v["explanation"][:200],  # Strict limit
+                            "reference": v.get("reference", "UNKNOWN"),
+                            "suspected_fabrication": v["verdict"] in ["False", "Unknown"],
+                            "generator_model": VERIFIER_MODEL,
+                            "raw_response_path": "",
+                            "meta": {"confidence": 0.8 if v["verdict"] == "True" else 0.2}
+                        }
+                        all_results.append(result)
+                    else:
+                        # Missing result
+                        failed_result = {
+                            **item,
+                            "verdict": "False",
+                            "explanation": "Verification incomplete",
+                            "reference": "UNKNOWN", 
+                            "suspected_fabrication": True,
+                            "generator_model": VERIFIER_MODEL,
+                            "raw_response_path": "",
+                            "meta": {"confidence": 0.0}
+                        }
+                        all_results.append(failed_result)
+                
+                break  # Success, exit retry loop
+                
+            except Exception as e:
+                last_err = e
+                logger.error(f"Verification chunk failed, attempt {attempt}: {str(e)}")
+                
+                if attempt == MAX_RETRIES:
+                    # Add failed results for this chunk
+                    for item in chunk:
+                        failed_result = {
+                            **item,
+                            "verdict": "False",
+                            "explanation": f"Verification failed: {str(e)[:50]}",
+                            "reference": "UNKNOWN",
+                            "suspected_fabrication": True,
+                            "generator_model": VERIFIER_MODEL,
+                            "raw_response_path": "",
+                            "meta": {"confidence": 0.0, "verification_failed": True}
+                        }
+                        all_results.append(failed_result)
                 else:
-                    logger.warning(
-                        f"Length mismatch: got {len(parsed)}, expected {len(items)}"
-                    )
+                    wait_time = backoff_with_jitter(attempt)
+                    time.sleep(wait_time)
 
-            # Annotate results
-            for i, result in enumerate(parsed):
-                result.setdefault(
-                    "raw_response_path",
-                    save_raw_response(resp_text, VERIFIER_MODEL, attempt))
-                result.setdefault("generator_model", VERIFIER_MODEL)
-                result.setdefault("meta", {}).setdefault("confidence", 0.5)
+        # Small delay between chunks
+        if len(all_results) < len(items):
+            time.sleep(0.5)
 
-            return parsed
-
-        except Exception as e:
-            last_err = e
-            logger.error(
-                f"Verification failed with key {key_index}, attempt {attempt}: {str(e)}"
-            )
-
-            # Create manual review items for persistent failures
-            if attempt == MAX_RETRIES:
-                for item in items:
-                    create_manual_review_item(item.get("id", "unknown"),
-                                              item.get("claim", ""),
-                                              item.get("context_excerpt", ""),
-                                              last_raw_path or "unknown",
-                                              VERIFIER_MODEL, key_index,
-                                              f"Attempt {attempt}: {str(e)}")
-
-            if attempt < MAX_RETRIES:
-                wait_time = backoff_with_jitter(attempt)
-                logger.info(
-                    f"Backing off for {wait_time:.2f}s (attempt {attempt})")
-                time.sleep(wait_time)
-
-    logger.error(
-        f"Batch verify failed after {MAX_RETRIES} attempts: {last_err}")
-
-    # Return failed verification results
-    failed_results = []
-    for item in items:
-        failed_result = {
-            "id": item.get("id", "unknown"),
-            "language": item.get("language", "unknown"),
-            "claim": item.get("claim", ""),
-            "context_chunk_id": item.get("context_chunk_id", 0),
-            "context_excerpt": item.get("context_excerpt", ""),
-            "verdict": "False",
-            "explanation": f"Verification failed: {str(last_err)[:50]}",
-            "reference": "UNKNOWN",
-            "suspected_fabrication": True,
-            "generator_model": VERIFIER_MODEL,
-            "raw_response_path": last_raw_path or "",
-            "meta": {
-                "confidence": 0.0,
-                "verification_failed": True
-            }
-        }
-        failed_results.append(failed_result)
-
-    return failed_results
+    return all_results
 
 
 def batch_verify_single(items: List[Dict]) -> List[Dict]:
