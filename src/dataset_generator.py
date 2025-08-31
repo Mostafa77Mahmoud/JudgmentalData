@@ -549,18 +549,22 @@ class DatasetGenerator:
         # Local pre-verification
         locally_verified, needs_model = self._local_pre_verification(candidates, language)
 
-        # Model verification for remaining candidates
+        # Skip model verification - use local verification only
         failed_raw_paths = []
-        if needs_model:
-            model_verified = self._batch_verify_with_model(needs_model, language, batch_size=4)
-            all_examples = locally_verified + model_verified
-
-            # Collect failed raw paths
-            for ex in model_verified:
-                if ex.get("suspected_fabrication") and ex.get("raw_response_path"):
-                    failed_raw_paths.append(ex["raw_response_path"])
-        else:
-            all_examples = locally_verified
+        
+        # Mark all unverified items as False/fabricated for safety
+        for candidate in needs_model:
+            candidate.update({
+                "verdict": "False",
+                "explanation": "No local verification match found",
+                "reference": "UNKNOWN",
+                "suspected_fabrication": True,
+                "generator_model": "local",
+                "raw_response_path": "",
+                "meta": {**candidate.get("meta", {}), "confidence": 0.0, "local_only": True}
+            })
+        
+        all_examples = locally_verified + needs_model
 
         # Filter valid examples
         valid_examples = []
@@ -627,11 +631,19 @@ class DatasetGenerator:
             candidates = self._generate_candidates_from_seeds(batch_seeds, language)
             locally_verified, needs_model = self._local_pre_verification(candidates, language)
 
-            if needs_model:
-                model_verified = self._batch_verify_with_model(needs_model, language)
-                batch_examples = locally_verified + model_verified
-            else:
-                batch_examples = locally_verified
+            # Skip model verification - use local only
+            for candidate in needs_model:
+                candidate.update({
+                    "verdict": "False",
+                    "explanation": "No local verification match found",
+                    "reference": "UNKNOWN", 
+                    "suspected_fabrication": True,
+                    "generator_model": "local",
+                    "raw_response_path": "",
+                    "meta": {**candidate.get("meta", {}), "confidence": 0.0, "local_only": True}
+                })
+            
+            batch_examples = locally_verified + needs_model
 
             # Filter valid examples
             for ex in batch_examples:

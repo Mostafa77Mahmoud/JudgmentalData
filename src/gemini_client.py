@@ -149,17 +149,16 @@ def extract_text(response):
 
 
 def _verify_schema():
-    """JSON Schema for structured verification output"""
+    """Simplified JSON Schema without additionalProperties"""
     return {
         "type": "array",
         "items": {
             "type": "object",
-            "additionalProperties": False,
             "properties": {
                 "id": {"type": "string"},
-                "verdict": {"type": "string", "enum": ["True", "False", "Unknown"]},
-                "explanation": {"type": "string", "maxLength": 200},
-                "reference": {"type": "string", "maxLength": 300}
+                "verdict": {"type": "string"},
+                "explanation": {"type": "string"},
+                "reference": {"type": "string"}
             },
             "required": ["id", "verdict", "explanation", "reference"]
         }
