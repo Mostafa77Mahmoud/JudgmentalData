@@ -1,0 +1,191 @@
+التشخيص السريع (من اللوجات والملفات اللي بعته)
+
+الـ smoke test بيخلص في ثانية ويرجع fabrication 100% — هذا لأن الحساب النهائي للمعدل (fabrication_rate) يُحسب قبل/بدون تحقق فعلي من النماذج، أو لأن كل الـ candidates يتم وسمها suspected_fabrication: true (شاهدت generator_model: "local" في كل السجلات).
+
+ملف summary يُظهر اتجاه متضارب (verified_local: 0 و verified_model: 62 و fabrication_rate: 1.0) ⇒ إما منطق حساب الـ summary خاطئ أو التوقيت (summary يُكتب قبل اكتمال التحقق).
+
+IndentationError عند استيراد parse_utils — السبب غالبًا وجود مسافات/بايتز زائدة في أول الملف (BOM أو مسافات/تبويبات قبل import json). هذا يمنع تشغيل كامل التطبيق ويدخل السلوك في حالات فشل سريعة.
+
+التحقق المحلي (local verification) صارم جداً — فقط substring أو ≥85% overlap يؤدي للـ True؛ أي اختلاف صياغة يعامل كـ False → يزيد نسبة "fabrication".
+
+لا يوجد تسجيل تفصيلي (debug) عن سبب وضع suspected_fabrication لكل كيس — نحتاج لِ logs أكثر دقة لكي نفهم لماذا كل الكيسات تُوصم.
+
+خطة إصلاح سريعة (نفّذها بالترتيب)
+1) إصلاح فوري للـ IndentationError
+
+ربما الملف يبدأ بـ بايتات فارغة أو BOM. شغّل هذا الأمر (من داخل مشروعك) لإزالة أي بايتات بادئة:
+
+python - <<'PY'
+from pathlib import Path
+p = Path("src/parse_utils.py")
+b = p.read_bytes()
+# strip leading BOM / whitespace bytes
+new = b.lstrip(b'\ufeff'.encode('utf-8')) if isinstance(b, str) else b.lstrip()
+p.write_bytes(new)
+print("Stripped leading bytes from src/parse_utils.py")
+PY
+
+
+أو أبسط (يقرض المسافات/تبويبات في البداية):
+
+python - <<'PY'
+from pathlib import Path
+p = Path("src/parse_utils.py")
+s = p.read_text(encoding="utf-8")
+p.write_text(s.lstrip(), encoding="utf-8")
+print("Fixed leading whitespace")
+PY
+
+
+بعدها أعد تشغيل التطبيق — لو اختفى الـ IndentationError نكمل.
+
+2) أضف تسجيل debug محلي لتحديد سبب وسم suspected_fabrication
+
+في مكان تضع فيه الوسم (غالبًا في dataset_generator بعد local_verification أو قبل كتابة الملف)، أضف هذا الكود لكتابة أمثلة False مفصّلة:
+
+# داخل الحلقة التي تعالج كل candidate بعد local verification
+if candidate.get("suspected_fabrication", False):
+    logger = logging.getLogger("src.dataset_generator")
+    logger.debug("Suspected fabrication sample: id=%s model=%s verdict=%s overlap=%.3f exact_sub=%s excerpt=%s",
+                 candidate["id"],
+                 candidate.get("generator_model"),
+                 candidate.get("verdict"),
+                 candidate.get("meta", {}).get("overlap", None),
+                 candidate.get("meta", {}).get("exact_substring", None),
+                 candidate.get("context_excerpt")[:200])
+
+
+شغّل smoke test مرة ثانية مع مستوى لوغينج DEBUG (export LOGLEVEL=DEBUG أو تعديل logging.basicConfig) وامسح عينات من الـ debug output لتشوف لماذا كل كيس وُسم True.
+
+3) صحّح حساب الـ summary ووقت كتابته
+
+تأكد أن ملف smoke_test_summary.json يُكتب بعد اكتمال كل مراحل التحقق وبتعريف واضح:
+
+اقتراح تابع لحساب الـ summary (ضعه في نهاية الـ smoke test بعد كل التحقق):
+
+def compute_smoke_summary(generated, verified_local_count, verified_model_count, failed_candidates, language):
+    generated_count = len(generated)
+    verified_total = verified_local_count + verified_model_count
+    fabrication_rate = 1.0
+    if generated_count > 0:
+        fabrication_rate = (generated_count - verified_total) / generated_count
+    return {
+        "generated_count": generated_count,
+        "verified_local": verified_local_count,
+        "verified_model": verified_model_count,
+        "fabrication_rate": fabrication_rate,
+        "failed_candidates": failed_candidates,
+        "timestamp": time.time(),
+        "language": language,
+        "max_fabrication_threshold": 0.1,
+        "success": fabrication_rate <= 0.1
+    }
+
+
+وتأكد أن القيم verified_local_count و verified_model_count تُجمعان من مصادر صحيحة (التي تضبط candidate["verified_by"] = "local" أو "model" عند النجاح).
+
+4) خفف صرامة الـ local verification — أضف خطوة تشابه معنوي (semantic)
+
+أضف خطوة وسيطة قبل رفض النتيجة نهائياً: استخدام تضمينات (embeddings) وقياس تشابه (cosine). مثال (pseudocode — استخدم مكتبتك للـ embeddings):
+
+# thresholds
+OVERLAP_THRESHOLD = 0.85
+EMBED_SIM_THRESHOLD = 0.72  # تجريبية: ارفع/نزل حسب النتائج
+
+def local_verify(candidate, chunk_text):
+    # 1) exact substring
+    exact = find_exact_substring(candidate["reference"], chunk_text)
+    if exact:
+        candidate["meta"]["exact_substring"] = exact
+        return True
+
+    # 2) lexical token overlap
+    overlap = compute_token_overlap(candidate["reference"], chunk_text)
+    candidate["meta"]["overlap"] = overlap
+    if overlap >= OVERLAP_THRESHOLD:
+        return True
+
+    # 3) semantic similarity (fallback)
+    # استخدم الدالة اللي عندك لإخراج embedding للنص
+    emb_ref = get_embedding(candidate["reference"])
+    emb_chunk = get_embedding(chunk_text)
+    sim = cosine_similarity(emb_ref, emb_chunk)
+    candidate["meta"]["embedding_sim"] = sim
+    if sim >= EMBED_SIM_THRESHOLD:
+        return True
+
+    return False
+
+
+ملاحظات:
+
+لو ماعندكش خدمة داخلية للـ embeddings تقدر تستخدم نموذج صغير محلي أو API، لكن الهدف: خفض false negatives الناتجة عن اختلاف الصياغة.
+
+5) تأكد من تعبئة الحقل generator_model عند الإنشاء (important)
+
+في المكان اللي تولّد فيه الـ candidate تأكد تضيف اسم الـ model أو "local" بوضوح:
+
+candidate = {
+    "id": str(uuid.uuid4()),
+    ...,
+    "generator_model": model_name if model_name else "local",
+}
+
+
+بدون هذا الحقل، الـ summary و logs يبدوان فارغين أو غير مفيدين.
+
+6) تعقب حالات الانتهاء الغير متوقعة من النموذج (finish_reason != 0)
+
+من لوجاتك كان فيه finish_reason يؤدي لرسائل "No text attribute" أو finish_reason = 2. لذلك في gemini_client.call_model أضف معالجة صريحة لهذا الشرط:
+
+resp = client_call(...)
+if resp.candidates and resp.candidates[0].finish_reason != 0:
+    logger.warning("Model finished early: finish_reason=%s raw=%s", resp.candidates[0].finish_reason, resp)
+    # Save raw, mark candidate as 'manual_review' instead of suspected_fabrication
+    candidate["raw_response_path"] = save_raw(resp)
+    candidate["needs_manual_review"] = True
+    continue
+
+
+وبدلما يتم وسمها fabrication فوراً، احتفظ بها كـ needs_manual_review حتى يراجعها إنسان أو محاولة ثانية.
+
+7) خطوات تشغيل للتصحيح السريع (reproduce with 1 example)
+
+شغّل اختبار سريع لمثال واحد عشان تشوف المسار كاملاً:
+
+افتح REPL أو ملف debug_smoke.py:
+
+from src.dataset_generator import DatasetGenerator
+dg = DatasetGenerator(...)
+example = dg.load_seed("one_example_id")  # طريقة التحميل عندك
+cands = dg.generate_candidates([example], n_candidates=3, only_local=True)
+print("candidates:", cands)
+# run verification step single
+dg.run_local_verification_on_candidates(cands)
+
+
+راجع الـ logs المفصّلة اللي ضفتها في الخطوة (2) لمعرفة السبب المحدد لكل candidate.
+
+8) (اختياري لكن موصى به) تعديل الحساب النهائي لـ fabrication_rate
+
+بدلاً من حساب fabrication من كل الـ generated مباشرة، احتسبه من model-checked فقط أو استبعد الحالات needs_manual_review:
+
+effective_checked = verified_local + verified_model + manual_review_count
+fabrication_rate = (generated_count - (verified_local + verified_model)) / generated_count
+# أو
+fabrication_rate_checked = (model_checked_count - verified_model) / model_checked_count
+
+
+اختر المعادلة اللي تعكس واقعك: إذا تريد أن تدل الفشل الفعلي فعلاً على اختلاق، استخدم نسبة المرفوضين بعد التحقق (model or local) وليس كل الـ generated.
+
+رد سريع على نقاطك الأخيرة (ملخص/نصائح عملية)
+
+أصل الـ IndentationError أولاً (الملف يبدأ بمسافة/بايت مخفية). شغل السكربت أعلاه.
+
+شغل smoke test على مثال واحد مع DEBUG logging بعد إضافة الـ debug print؛ اقرأ لماذا كل كانديد يتصنف كـ fabrication.
+
+أخفف صرامة local verification بإضافة embedding-based similarity كخطوة وسيطة.
+
+لا تضع الـ suspected_fabrication = True تلقائياً لو finish_reason من الـ API غير 0 — ضع needs_manual_review واحتفظ بالـ raw response.
+
+صحّح حساب الـ summary ليُكتب بعد اكتمال التحقق، وتأكد من تعبئة generator_model.
