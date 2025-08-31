@@ -1,0 +1,441 @@
+You are an automated Replit agent with full edit and run privileges on this repository. Make the exact, safe, reversible code and config changes below so the smoke-test / dataset generation becomes robust, predictable, efficient on quota, and produces clean JSONL outputs. After each step commit changes (git commit) and log what you changed. If anything fails, stop and report the failing command + log excerpt.
+
+**High-level goals**
+
+1. Implement key-rotation + retry/backoff + jitter for all Gemini API calls.
+2. Use a single strict JSON-only verifier prompt (temperature=0) and force model `gemini-2.5-pro` for verification.
+3. Limit batch sizes and truncate contexts to safe length (<=512 chars) to avoid truncated model responses and reduce token usage.
+4. Add robust JSON parsing that recovers from truncated outputs (balanced-bracket repair, fallback extraction). Save every raw response to `raw/` for debugging.
+5. Use pre-chunked inputs (prefer `inputs/arabic_chunks.json`) as canonical source for generation/verification. Use `inputs/arabic_cleaned.txt` as fallback if chunks missing. Use `inputs/arabic_qa_pairs (2000).json` only for QA tasks, not for building judgmental labels.
+6. Add model `models/gemini-2.5-flash-lite` to models list and ensure all four API keys are used with rotation to avoid quota bottlenecks.
+7. Make the smoke-test deterministic and report metrics (generated count, verified locally, model-needed, fabrication rate). Save smoke test result files into `data/generation_stage_B/ar/smoke_test_ar_10.jsonl` and a log summary.
+
+---
+
+## Exact changes to make (apply in this order)
+
+### 0) Preflight & backup
+
+1. Create a git branch `fix/robust-gemini-client` and commit current repo state.
+
+   ```
+   git checkout -b fix/robust-gemini-client
+   git add -A && git commit -m "backup: before robust gemini client changes"
+   ```
+2. Ensure directories exist: `raw/`, `logs/`, `data/generation_stage_B/ar`, `progress/`. Create them if missing.
+
+### 1) Central config: add keys + models
+
+Open the repository config file (if you have `config.json` or `src/config.py` – if none, create `src/gemini_config.py`) and add the following exact content. Use the provided API keys (these were provided by the user). **Make sure file is added to .gitignore** if it will contain live keys (for Replit keep but still add .gitignore). Create `src/gemini_config.py` with:
+
+```python
+# src/gemini_config.py
+API_KEYS = [
+    "AIzaSyAspAo_UHjOCKxbmtaPCtldZ7g6XowHoV4",
+    "AIzaSyCLfpievRZO_J_Ryme_1-1T4SjVBOPCfjI",
+    "AIzaSyAIPk1An1O6sZiro64Q4R9PjVrqvPkSVvQ",
+    "AIzaSyBbidR_bEfiMrhOufE4PAHrYEBvuPuqakg"
+]
+
+# Order models with verification model first
+MODELS = [
+    "models/gemini-2.5-pro",
+    "models/gemini-2.5-flash",
+    "models/gemini-2.5-flash-lite"
+]
+
+# Tuning
+BATCH_SIZE = 6               # safe default (4-8 recommended)
+MAX_RETRIES = 5
+INITIAL_BACKOFF = 1.0
+MAX_BACKOFF = 30.0
+CONTEXT_MAX_CHARS = 512
+VERIFIER_MODEL = "models/gemini-2.5-pro"
+VERIFIER_TEMPERATURE = 0.0
+```
+
+Add `src/gemini_config.py` to `.gitignore` if repo will be shared (commit a template with keys removed if needed). Commit this change.
+
+### 2) Implement robust gemini client
+
+Replace or create `src/gemini_client.py` implementing:
+
+* key rotation,
+* exponential backoff + jitter,
+* save every raw response to `raw/<timestamp>_<batch_id>_<model>.resp.txt`,
+* a robust parser function that extracts balanced JSON arrays/objects, tries repairing truncated trailing brackets, and falls back to extracting top-level `{...}` objects via regex,
+* a `batch_verify(items: List[Dict]) -> List[Dict]` function that calls the verifier prompt and returns parsed verification objects (same order as input).
+
+Use the code below as the file content. **If you already have a gemini client, merge these changes into it rather than completely replacing network logic; keep your existing SDK usage but use the helper patterns.** Implement `send_verify_request()` according to whatever HTTP client/SDK you already use (requests or google client). If the repo uses `requests`, use that; otherwise adapt.
+
+**Paste this whole module into `src/gemini_client.py`.** Adjust `send_verify_request()` to your SDK as noted in TODO.
+
+````python
+# src/gemini_client.py
+import time
+import random
+import json
+import logging
+import os
+import re
+from typing import List, Dict
+from pathlib import Path
+from src.gemini_config import API_KEYS, MODELS, BATCH_SIZE, MAX_RETRIES, INITIAL_BACKOFF, MAX_BACKOFF, CONTEXT_MAX_CHARS, VERIFIER_MODEL, VERIFIER_TEMPERATURE
+
+logger = logging.getLogger(__name__)
+Path("raw").mkdir(parents=True, exist_ok=True)
+
+def rotate_key(attempt_index: int) -> str:
+    return API_KEYS[attempt_index % len(API_KEYS)]
+
+def exponential_backoff_sleep(attempt: int):
+    base = INITIAL_BACKOFF * (2 ** (attempt - 1))
+    jitter = random.uniform(0, base * 0.1)
+    sleep_for = min(base + jitter, MAX_BACKOFF)
+    logger.info("backoff sleep: %.2fs (attempt %d)", sleep_for, attempt)
+    time.sleep(sleep_for)
+
+# ---------------- send_verify_request: adapt to your client/SDK ----------------
+def send_verify_request(model_name: str, api_key: str, request_body: dict, attempt: int) -> str:
+    """
+    Replace this implementation with whatever SDK/HTTP client you use to call Gemini.
+    The function must return the response body as text (string).
+    Keep headers and retry/timeouts according to your environment.
+    """
+    # Example placeholder using 'requests' -- adapt if you use another SDK.
+    import requests
+    url = "https://api.generativeai.example/v1/models/{}/invoke".format(model_name)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    # payload shape: { "prompt": "<...>", "temperature": 0.0, "max_tokens": N, "stop": None }
+    resp = requests.post(url, headers=headers, json=request_body, timeout=60)
+    resp.raise_for_status()
+    return resp.text
+# ------------------------------------------------------------------------------
+
+def find_json_bounds(text: str):
+    """Find first balanced JSON array or object in text and return substring, or None."""
+    if not text:
+        return None
+    # search for opening bracket
+    starts = [(m.start(), m.group()) for m in re.finditer(r'[\[\{]', text)]
+    for start_index, start_char in starts:
+        stack = []
+        for i, ch in enumerate(text[start_index:], start_index):
+            if ch in ('[', '{'):
+                stack.append(ch)
+            elif ch in (']', '}'):
+                if not stack:
+                    break
+                opening = stack.pop()
+                # allow mismatch but continue
+            if not stack:
+                return text[start_index:i+1]
+    return None
+
+def robust_parse_json_array(text: str):
+    """Try several heuristics to parse model response into a JSON list of objects."""
+    if not text:
+        return None
+    # remove code fences and common wrapper text
+    text = re.sub(r"^```(?:json)?\n", "", text.strip())
+    text = re.sub(r"\n```$", "", text)
+    text = text.strip()
+
+    # direct parse
+    try:
+        j = json.loads(text)
+        if isinstance(j, list):
+            return j
+        if isinstance(j, dict):
+            return [j]
+    except Exception:
+        pass
+
+    # find first balanced structure
+    candidate = find_json_bounds(text)
+    if candidate:
+        try:
+            j = json.loads(candidate)
+            if isinstance(j, list):
+                return j
+            if isinstance(j, dict):
+                return [j]
+        except Exception:
+            # try simple repair: if opened '[' but missing ']', add closing brackets
+            if candidate.count('[') > candidate.count(']'):
+                repaired = candidate + (']' * (candidate.count('[') - candidate.count(']')))
+                try:
+                    j = json.loads(repaired)
+                    if isinstance(j, list):
+                        return j
+                    if isinstance(j, dict):
+                        return [j]
+                except Exception:
+                    pass
+    # fallback: regex-extract top-level objects
+    objs = re.findall(r'\{(?:[^{}]|\{[^}]*\})*\}', text, flags=re.DOTALL)
+    parsed = []
+    for o in objs:
+        try:
+            parsed.append(json.loads(o))
+        except Exception:
+            continue
+    if parsed:
+        return parsed
+    return None
+
+# The strict verifier prompt to include in requests (kept as constant)
+VERIFIER_PROMPT = r"""
+System: You are a strict JSON-only verifier. You MUST respond with exactly one JSON array containing one object per input item and NOTHING else (no prose, no backticks, no commentary).
+
+Input: an array `items` where each item has:
+- id: string
+- claim: string
+- context_excerpt: string (already truncated to <=512 chars)
+- language: "ar" or "en"
+- context_chunk_id: integer
+
+Task: For each item decide whether the claim can be VERIFIED from the context excerpt.
+Rules:
+1. If an exact substring of the claim (or a near-literal short quote) exists inside context_excerpt, set verdict to "True", reference to that exact matched substring, explanation to a one-sentence quote-based justification (<=30 words), suspected_fabrication false, confidence 0.90-1.00.
+2. If the context does NOT contain evidence to support the claim, set verdict to "False", reference: "UNKNOWN", explanation: short (<=20 words), suspected_fabrication true or false as appropriate, confidence 0.1-0.5.
+3. Never invent references. If unsure, choose "False" with reference "UNKNOWN".
+4. Use verdict values exactly "True" or "False".
+5. The output JSON array length must match input length and preserve input order. Each object MUST include fields:
+   { "id", "language", "claim", "context_chunk_id", "context_excerpt", "verdict", "explanation", "reference", "suspected_fabrication", "generator_model", "raw_response_path", "meta" }
+6. meta must contain at least {"confidence": <0-1>, "seed_id": "<seed>"}. generator_model must be the model name used.
+
+Return only the JSON array.
+"""
+
+def prepare_verifier_request(items: List[Dict], max_tokens: int):
+    # Build the request payload expected by your Gemini SDK.
+    # This example expects a `prompt` and options; adapt to your SDK.
+    prompt = {
+        "items": items,
+        "note": "items array above"
+    }
+    # Many Gemini-style APIs allow a single prompt string. Serialize items into prompt body text.
+    prompt_text = VERIFIER_PROMPT + "\n\nINPUT_ITEMS_JSON:\n" + json.dumps(items, ensure_ascii=False)
+    payload = {
+        "prompt": prompt_text,
+        "temperature": VERIFIER_TEMPERATURE,
+        "max_tokens": max_tokens,
+        "top_p": 1.0
+    }
+    return payload
+
+def batch_verify(items: List[Dict]) -> List[Dict]:
+    """
+    items: list dict with id, claim, context_excerpt, language, context_chunk_id
+    returns: parsed verification objects in the same order
+    """
+    assert len(items) <= BATCH_SIZE, f"batch size must be <= {BATCH_SIZE}"
+    # ensure truncation
+    for it in items:
+        it["context_excerpt"] = it.get("context_excerpt","")[:CONTEXT_MAX_CHARS]
+
+    # estimate tokens per item; conservative default
+    est_tokens_per_item = 300
+    max_tokens = min(4000, est_tokens_per_item * max(1, len(items)))
+
+    last_err = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        api_key = rotate_key(attempt - 1)
+        try:
+            payload = prepare_verifier_request(items, max_tokens)
+            resp_text = send_verify_request(VERIFIER_MODEL, api_key, payload, attempt)
+            ts = int(time.time())
+            raw_path = f"raw/{ts}_verify_{attempt}_{VERIFIER_MODEL.replace('/','_')}.resp.txt"
+            with open(raw_path, "w", encoding="utf8") as f:
+                f.write(resp_text)
+            parsed = robust_parse_json_array(resp_text)
+            if parsed is None:
+                raise ValueError("robust_parse_json_array returned None")
+            if not isinstance(parsed, list) or len(parsed) != len(items):
+                # If length mismatch, attempt to wrap single object into array
+                if isinstance(parsed, dict):
+                    parsed = [parsed]
+                else:
+                    raise ValueError(f"Parsed length mismatch: parsed_len={len(parsed) if isinstance(parsed, list) else 'NA'} expected={len(items)}")
+            # annotate raw path and generator_model
+            for p in parsed:
+                p.setdefault("raw_response_path", raw_path)
+                p.setdefault("generator_model", VERIFIER_MODEL)
+            return parsed
+        except Exception as e:
+            last_err = e
+            logger.error("Unexpected error with key %s, attempt %d: %s", api_key, attempt, str(e))
+            if attempt < MAX_RETRIES:
+                exponential_backoff_sleep(attempt)
+                continue
+            else:
+                break
+    logger.error("Batch verify failed after %d attempts: %s", MAX_RETRIES, last_err)
+    return [None] * len(items)
+````
+
+Commit `src/gemini_client.py`.
+
+> **Important:** adapt `send_verify_request` to your exact API endpoint & authentication method. The sample uses `requests` and a placeholder endpoint—update to the real Gemini endpoint your project uses.
+
+### 3) Update `src/dataset_generator.py` to use the new client and local pre-verification rules
+
+Open `src/dataset_generator.py` and make the following edits:
+
+1. Import the new client and config:
+
+```python
+from src.gemini_client import batch_verify, robust_parse_json_array
+from src.gemini_config import BATCH_SIZE, CONTEXT_MAX_CHARS
+```
+
+2. Before sending items to the model for verification, run a **local deterministic verifier** that sets `verdict = "True"` if an exact substring of the claim or an exact normalized numeric/identifier match exists in the chunk. If local verdict is not confident, send to `batch_verify()` in batches of size `BATCH_SIZE`.
+
+Local pre-verification pseudocode to implement:
+
+```python
+def local_verify_one(claim: str, context: str) -> (bool, dict):
+    # Normalize whitespace and remove diacritics/elongation if needed.
+    if claim.strip() == "":
+        return False, None
+    # exact substring (casefold for english; exact normalized for Arabic)
+    if claim in context or claim.strip() in context:
+        return True, {
+            "id": "<id>",
+            "language": lang,
+            "claim": claim,
+            "context_chunk_id": chunk_id,
+            "context_excerpt": context[:CONTEXT_MAX_CHARS],
+            "verdict": "True",
+            "explanation": "Exact substring match",
+            "reference": claim,
+            "suspected_fabrication": False,
+            "generator_model": "local",
+            "raw_response_path": "",
+            "meta": {"confidence": 0.99, "seed_id": seed}
+        }
+    # token overlap heuristic: compute token overlap ratio using simple whitespace tokens
+    claim_tokens = set(claim.split())
+    context_tokens = set(context.split())
+    overlap = len(claim_tokens & context_tokens) / max(1, len(claim_tokens))
+    if overlap >= 0.85:
+        # high-confidence local match
+        return True, {... same structure with explanation and confidence 0.95 ...}
+    return False, None
+```
+
+3. When preparing `items_to_verify` to send to `batch_verify`, ensure each item includes fields: `id`, `claim`, `context_excerpt` (truncated to CONTEXT\_MAX\_CHARS), `language`, `context_chunk_id`.
+
+4. After `batch_verify` returns parsed results, validate schema using `_validate_example_schema()` (you already have this function) and append only valid examples to your JSONL file. Save rejected ones to `raw/failed_parses/` with reason.
+
+5. Replace any direct per-example model call with batched `batch_verify()` and handle `None` returns gracefully (mark as `verification_failed` and save raw).
+
+Commit these edits.
+
+### 4) Add robust smoke-test orchestration
+
+Create or update `scripts/validate_smoke_test.py` to:
+
+* read `inputs/arabic_chunks.json` (preferred) or fallback to `inputs/arabic_cleaned.txt` (if chunks file missing, create chunks of \~1024 chars and save to `inputs/arabic_chunks.json`),
+* pick N seeds (for smoke test use N=15 for Arabic unless configured otherwise),
+* for each seed assemble context chunks and local-verify; collect items needing model verification and send them in batches to `batch_verify`,
+* save `data/generation_stage_B/ar/smoke_test_ar_10.jsonl` (append each example as newline JSON),
+* compute and print metrics: generated\_count, locally\_verified, model\_verified, failed\_parses\_count, fabrication\_rate (count of examples with suspected\_fabrication true / total),
+* write a small summary log to `logs/smoke_test_summary.log`.
+
+Add a top-level `--run` option that executes the full smoke test and exits. Commit the script.
+
+### 5) Ensure raw responses saved and monitored
+
+All places that call the model must now save response bodies into `raw/` with timestamped filenames. Update any code path that used to discard responses to keep raw files. If `raw/` grows large, implement a retention policy (keep last 500 files) with a small helper `scripts/cleanup_raw.py`.
+
+### 6) Add a CI-like smoke test run command and logging
+
+Update `app.py` or repository top-level `Makefile` (or add `scripts/run_smoke.sh`) to:
+
+* run `python3 scripts/validate_smoke_test.py --lang ar --count 15`
+* capture STDOUT/STDERR to `logs/smoke_test_run_<ts>.log`
+* return non-zero if fabrication\_rate > 25% or failed\_parses > 5.
+
+Commit this change.
+
+---
+
+## Verifier prompt (exact string) — include it as constant
+
+Use this exact string (it was already added to gemini\_client.py as `VERIFIER_PROMPT`). The Replit agent must NOT add any additional text around it when sending to the model—send raw.
+
+(Do not change the string. It is the same as stored in `src/gemini_client.py`.)
+
+---
+
+## Choice of source texts & dataset strategy (directives the agent must apply)
+
+* Prefer `inputs/arabic_chunks.json` as the canonical source for generation/verification because it’s already chunked for token budgets and preserves chunk IDs. If it does not exist, create it by splitting `inputs/arabic_cleaned.txt` into logical paragraphs / \~1000-char chunks (try to split at sentence boundaries) and save the JSON file; then use it going forward.
+* `inputs/arabic_qa_pairs (2000).json` should be used only for QA training tasks — do NOT use it as primary evidence for judgmental labels. Judgmental dataset should be built from claims + matching context chunks (so each JSONL judgment example contains claim + context excerpt + verdict + reference).
+* When generating negative (False) examples, prefer deterministic perturbations (as your `dataset_generator._generate_perturbations` does) rather than relying entirely on model-generated false examples — this improves label quality.
+
+Add a short README note `docs/data_source_policy.md` stating the above.
+
+Commit this file.
+
+---
+
+## Run the smoke-test and report
+
+1. Run the smoke test:
+
+   ```
+   python3 scripts/validate_smoke_test.py --lang ar --count 15
+   ```
+2. Save STDOUT/STDERR to `logs/smoke_test_run_<ts>.log`.
+3. Upload/print the following in your final agent reply (after the run completes):
+
+   * the `git diff` summary (list of modified files)
+   * the smoke-test summary metrics (generated\_count, local\_verified, model\_verified, failed\_parses\_count, fabrication\_rate)
+   * show first 5 lines of `raw/` newest files and the path to `data/generation_stage_B/ar/smoke_test_ar_10.jsonl`
+   * if any error happened, attach the raw response file that caused a parse failure.
+
+---
+
+## Safety, reproducibility & logging
+
+* Every edit MUST be committed with a short message describing the change.
+* Keep backups of original files (automatically create `*.bak` copies before overwrite).
+* Avoid printing API keys to logs. If you must log which key index failed, log index only (not value).
+* Add a small `scripts/show_keys_status.py` script that prints how many keys are loaded (not their values) for debugging.
+
+---
+
+## Final deliverable (what I expect you to do and then report back)
+
+* Make all code/config changes described and commit them on branch `fix/robust-gemini-client`.
+* Run the smoke test `python3 scripts/validate_smoke_test.py --lang ar --count 15`.
+* Return in the agent final message (JSON or plain text) containing:
+
+  * `modified_files`: list of files changed,
+  * `git_commit_hash`: new HEAD commit hash,
+  * `smoke_test_summary`: {generated\_count, local\_verified, model\_verified, failed\_parses\_count, fabrication\_rate},
+  * `smoke_test_file`: path to the saved jsonl file,
+  * `raw_sample_paths`: list of up to 5 newest raw response file paths,
+  * `errors`: any fatal errors and the path to the raw response that failed parsing.
+
+---
+
+## Quick rationale for the agent (so you do exactly the right things)
+
+* Use pre-chunked JSON (inputs/arabic\_chunks.json) to control token usage & keep chunk ids.
+* Run `local_verify` first (exact substring or high overlap) to avoid unnecessary model calls and save quota. Only ambiguous examples go to the verifier model in batches.
+* Use `gemini-2.5-pro` for verification (highest reliability), keep `flash` models for generation, and include `flash-lite` as mid-tier to spread load. Rotate among all four API keys on request attempts.
+* Enforce `temperature=0` and strict JSON-only prompt; save raw responses and add robust parser for truncated output repairs.
+* Batch size 4-8 is recommended — default used is 6.
+
+---
+
+Do the work now. After you finish run, include the exact smoke-test output and the `git commit` hash for the branch `fix/robust-gemini-client`. If any external dependency is required (e.g., `requests`), add it to `requirements.txt` and install in the environment before running the smoke test.
+
+If anything is unclear in your environment (like exact Gemini endpoint or SDK), adapt `send_verify_request()` to the SDK available; but prefer `requests` HTTP with a configurable endpoint in `src/gemini_config.py`. Report any adaptation you made.
