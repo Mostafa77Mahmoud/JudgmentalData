@@ -13,8 +13,8 @@ GenerateContentResponse(
         }
       ],
       "usage_metadata": {
-        "prompt_token_count": 9732,
-        "total_token_count": 12131
+        "prompt_token_count": 2182,
+        "total_token_count": 3781
       },
       "model_version": "gemini-2.5-flash"
     }),

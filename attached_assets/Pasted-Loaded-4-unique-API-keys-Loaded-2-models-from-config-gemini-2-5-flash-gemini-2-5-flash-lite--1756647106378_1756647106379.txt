@@ -1,0 +1,41 @@
+Loaded 4 unique API keys
+Loaded 2 models from config: ['gemini-2.5-flash', 'gemini-2.5-flash-lite']
+2025-08-31 13:30:00,092 - src.dataset_generator - INFO - Loaded pre-chunked data from chunks.json files
+2025-08-31 13:30:00,094 - src.dataset_generator - INFO - Loaded 610 Arabic seeds, 575 English seeds
+2025-08-31 13:30:08,102 - src.dataset_generator - INFO - Starting smoke test for ar with 20 examples
+2025-08-31 13:30:10,841 - src.dataset_generator - INFO - Generated 25 candidates
+2025-08-31 13:30:10,841 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,842 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,842 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,843 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,844 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,844 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,845 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,846 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,847 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,847 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,848 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,849 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,849 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,850 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,851 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,851 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,852 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,853 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,853 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,854 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,855 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,856 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,856 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,857 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,857 - src.dataset_generator - WARNING - Context excerpt exceeds 512 characters, truncating
+2025-08-31 13:30:10,858 - src.dataset_generator - INFO - Local verification: 5 verified, 20 need model
+2025-08-31 13:30:18,879 - src.gemini_client - ERROR - API call failed, error saved to raw/1756647018878_error_1_att1.resp.json
+2025-08-31 13:30:18,879 - src.gemini_client - ERROR - Verification failed with key 0, attempt 1: Response truncated due to MAX_TOKENS. Increase max_output_tokens. Raw saved to raw/1756647018876_verify_gemini-2.5-flash_att1.resp.txt
+2025-08-31 13:30:18,879 - src.gemini_client - INFO - Backing off for 2.13s (attempt 1)
+2025-08-31 13:30:28,861 - src.gemini_client - ERROR - API call failed, error saved to raw/1756647028860_error_2_att2.resp.json
+2025-08-31 13:30:28,861 - src.gemini_client - ERROR - Verification failed with key 1, attempt 2: Response truncated due to MAX_TOKENS. Increase max_output_tokens. Raw saved to raw/1756647028858_verify_gemini-2.5-flash_att2.resp.txt
+2025-08-31 13:30:28,861 - src.gemini_client - INFO - Backing off for 4.77s (attempt 2)
+2025-08-31 13:30:42,347 - src.gemini_client - ERROR - API call failed, error saved to raw/1756647042346_error_3_att3.resp.json
+2025-08-31 13:30:42,348 - src.gemini_client - ERROR - Verification failed with key 2, attempt 3: Response truncated due to MAX_TOKENS. Increase max_output_tokens. Raw saved to raw/1756647042344_verify_gemini-2.5-flash_att3.resp.txt
+2025-08-31 13:30:42,348 - src.gemini_client - INFO - Backing off for 8.50s (attempt 3)
