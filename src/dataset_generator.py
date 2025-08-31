@@ -347,7 +347,7 @@ class DatasetGenerator:
                     "suspected_fabrication": False,
                     "generator_model": "local",
                     "raw_response_path": "",
-                    "meta": {"confidence": 0.99, "seed_id": seed_id}
+                    "meta": {"confidence": 0.99, "seed_id": seed_id, "exact_substring": True}
                 }
         else:  # Arabic
             if claim in context:
@@ -363,15 +363,16 @@ class DatasetGenerator:
                     "suspected_fabrication": False,
                     "generator_model": "local",
                     "raw_response_path": "",
-                    "meta": {"confidence": 0.99, "seed_id": seed_id}
+                    "meta": {"confidence": 0.99, "seed_id": seed_id, "exact_substring": True}
                 }
 
         # Token overlap heuristic
         claim_tokens = set(claim.split())
         context_tokens = set(context.split())
+        overlap_score = 0.0
         if len(claim_tokens) > 0:
-            overlap = len(claim_tokens & context_tokens) / len(claim_tokens)
-            if overlap >= 0.85:
+            overlap_score = len(claim_tokens & context_tokens) / len(claim_tokens)
+            if overlap_score >= 0.85:
                 reference = self._find_best_reference_substring(claim, context)
                 return True, {
                     "id": item_id,
@@ -380,12 +381,12 @@ class DatasetGenerator:
                     "context_chunk_id": chunk_id,
                     "context_excerpt": context,
                     "verdict": "True",
-                    "explanation": f"High token overlap ({overlap:.2f})",
+                    "explanation": f"High token overlap ({overlap_score:.2f})",
                     "reference": reference,
                     "suspected_fabrication": False,
                     "generator_model": "local",
                     "raw_response_path": "",
-                    "meta": {"confidence": 0.95, "seed_id": seed_id}
+                    "meta": {"confidence": 0.95, "seed_id": seed_id, "overlap": overlap_score}
                 }
 
         return False, None
@@ -404,7 +405,6 @@ class DatasetGenerator:
 
         # Group into batches - smaller for Arabic
         effective_batch_size = 2 if language == "ar" else BATCH_SIZE
-        total_verified = len(verified)
         remaining = [c for c in candidates if c["id"] not in [v["id"] for v in verified]]
 
         for i in range(0, len(remaining), effective_batch_size):
@@ -440,8 +440,8 @@ class DatasetGenerator:
                     candidate = batch[j] if j < len(batch) else batch[-1]
                     candidate.update({
                         "verdict": "False",
-                        "reference": "UNKNOWN",
                         "explanation": "Verification failed",
+                        "reference": "UNKNOWN",
                         "suspected_fabrication": True,
                         "raw_response_path": "",
                         "meta": {**candidate.get("meta", {}), "confidence": 0.0}
@@ -551,7 +551,7 @@ class DatasetGenerator:
 
         # Skip model verification - use local verification only
         failed_raw_paths = []
-        
+
         # Mark all unverified items as False/fabricated for safety
         for candidate in needs_model:
             candidate.update({
@@ -563,7 +563,16 @@ class DatasetGenerator:
                 "raw_response_path": "",
                 "meta": {**candidate.get("meta", {}), "confidence": 0.0, "local_only": True}
             })
-        
+            # Add debug logging for suspected fabrication
+            self.logger.debug("Suspected fabrication: id=%s model=%s verdict=%s overlap=%.3f exact_sub=%s excerpt=%s",
+                        candidate.get("id"),
+                        candidate.get("generator_model", "unknown"),
+                        candidate.get("verdict"),
+                        candidate.get("meta", {}).get("overlap", 0.0),
+                        candidate.get("meta", {}).get("exact_substring", False),
+                        candidate.get("context_excerpt", "")[:200])
+
+
         all_examples = locally_verified + needs_model
 
         # Filter valid examples
@@ -636,13 +645,22 @@ class DatasetGenerator:
                 candidate.update({
                     "verdict": "False",
                     "explanation": "No local verification match found",
-                    "reference": "UNKNOWN", 
+                    "reference": "UNKNOWN",
                     "suspected_fabrication": True,
                     "generator_model": "local",
                     "raw_response_path": "",
                     "meta": {**candidate.get("meta", {}), "confidence": 0.0, "local_only": True}
                 })
-            
+                # Add debug logging for suspected fabrication
+                self.logger.debug("Suspected fabrication: id=%s model=%s verdict=%s overlap=%.3f exact_sub=%s excerpt=%s",
+                            candidate.get("id"),
+                            candidate.get("generator_model", "unknown"),
+                            candidate.get("verdict"),
+                            candidate.get("meta", {}).get("overlap", 0.0),
+                            candidate.get("meta", {}).get("exact_substring", False),
+                            candidate.get("context_excerpt", "")[:200])
+
+
             batch_examples = locally_verified + needs_model
 
             # Filter valid examples

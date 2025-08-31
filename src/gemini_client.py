@@ -115,13 +115,13 @@ def validate_token_limits(prompt: str, max_output_tokens: int) -> Tuple[bool, st
     """Validate that prompt and expected output are within token limits"""
     # Rough estimation: 1 token ≈ 3-4 characters for mixed languages
     estimated_input_tokens = len(prompt) // 3
-    
+
     if estimated_input_tokens > MAX_INPUT_TOKENS:
         return False, f"Input tokens ({estimated_input_tokens}) exceed limit ({MAX_INPUT_TOKENS})"
-    
+
     if max_output_tokens > MAX_OUTPUT_TOKENS:
         return False, f"Output tokens ({max_output_tokens}) exceed limit ({MAX_OUTPUT_TOKENS})"
-    
+
     return True, "OK"
 
 
@@ -208,7 +208,7 @@ def send_verify_request(model_name: str, api_key: str, items: List[Dict], lang: 
             if hasattr(candidate, 'finish_reason'):
                 finish_reason = candidate.finish_reason
                 finish_reason_name = finish_reason.name if hasattr(finish_reason, 'name') else str(finish_reason)
-                
+
                 if finish_reason_name == "MAX_TOKENS" or finish_reason == 2:
                     raise RuntimeError(f"Verification truncated due to MAX_TOKENS. Raw saved to {raw_path}")
                 elif finish_reason in [3, 4] or finish_reason_name in ["SAFETY", "RECITATION"]:
@@ -413,7 +413,7 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
         item["context_excerpt"] = item.get("context_excerpt", "")[:CONTEXT_MAX_CHARS]
 
     language = items[0].get("language", "en") if items else "en"
-    
+
     # Split into small chunks of 5 items to prevent MAX_TOKENS
     ITEMS_PER_CALL = 5
     all_results = []
@@ -422,7 +422,7 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
     for chunk in chunked(items, ITEMS_PER_CALL):
         for attempt in range(1, MAX_RETRIES + 1):
             api_key = rotate_key(attempt - 1)
-            
+
             try:
                 # Prepare verification items (minimal structure)
                 verify_items = []
@@ -434,7 +434,7 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
                     })
 
                 verified = send_verify_request(VERIFIER_MODEL, api_key, verify_items, language, attempt)
-                
+
                 # Map results back to original structure
                 result_map = {v["id"]: v for v in verified}
                 for item in chunk:
@@ -458,20 +458,20 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
                             **item,
                             "verdict": "False",
                             "explanation": "Verification incomplete",
-                            "reference": "UNKNOWN", 
+                            "reference": "UNKNOWN",
                             "suspected_fabrication": True,
                             "generator_model": VERIFIER_MODEL,
                             "raw_response_path": "",
                             "meta": {"confidence": 0.0}
                         }
                         all_results.append(failed_result)
-                
+
                 break  # Success, exit retry loop
-                
+
             except Exception as e:
                 last_err = e
                 logger.error(f"Verification chunk failed, attempt {attempt}: {str(e)}")
-                
+
                 if attempt == MAX_RETRIES:
                     # Add failed results for this chunk
                     for item in chunk:
@@ -545,6 +545,13 @@ class GeminiClient:
                 time.time()) + duration
             self.logger.warning(f"Blocked key {key_index} for {duration}s")
 
+    def _save_raw_response(self, response_obj: Any, prompt: str, attempt: int) -> str:
+        """Helper to save raw response, similar to save_raw_response but specific to call_model"""
+        # Extract model name from prompt or default
+        model_name_match = re.search(r'gemini-\d\.\d-[a-zA-Z-]+', prompt)
+        model_name = model_name_match.group(0) if model_name_match else "unknown_model"
+        return save_raw_response(response_obj, model_name, attempt)
+
     def call_model(self,
                    prompt: str,
                    model: str = "gemini-2.5-flash",
@@ -593,20 +600,41 @@ class GeminiClient:
                     prompt, generation_config=generation_config)
                 latency = time.time() - start_time
 
-                # Check if response was truncated
-                if hasattr(response, 'candidates') and response.candidates:
+                # Improve finish_reason handling
+                text_content = None
+                if response.candidates and len(response.candidates) > 0:
                     candidate = response.candidates[0]
-                    if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
-                        finish_reason_name = candidate.finish_reason.name if hasattr(candidate.finish_reason, 'name') else str(candidate.finish_reason)
-                        if finish_reason_name == "MAX_TOKENS":
-                            logger.warning(f"Response truncated due to MAX_TOKENS limit. Consider reducing prompt or increasing max_output_tokens.")
+
+                    # Check finish reason
+                    # finish_reason can be an enum or an integer.
+                    # 1: STOP (normal completion)
+                    # 2: MAX_TOKENS (truncated)
+                    # 3: SAFETY (content filtered)
+                    # 4: OTHER (unspecified error)
+                    finish_reason = getattr(candidate, 'finish_reason', None)
+                    finish_reason_val = finish_reason.value if hasattr(finish_reason, 'name') else finish_reason
+
+                    if finish_reason_val not in [1, None]: # Allow STOP or if finish_reason is missing
+                        error_msg = f"Model finished with reason: {finish_reason}. Response may be incomplete or blocked."
+                        self.logger.warning(error_msg)
+                        # Save raw response for manual review
+                        raw_path = self._save_raw_response(response, prompt, attempt)
+                        # Raise an exception to indicate failure and provide context
+                        raise Exception(f"{error_msg} Raw response saved to: {raw_path}")
+
+                    if hasattr(candidate, 'content') and candidate.content and hasattr(candidate.content, 'parts'):
+                        if candidate.content.parts:
+                            # Concatenate all text parts
+                            text_parts = [part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text]
+                            text_content = "\n".join(text_parts)
+
 
                 # Update key state
                 with self.lock:
                     self.key_states[key_index]["requests_made"] += 1
 
-                raw_path = save_raw_response(response, model, attempt)
-                response_text = extract_text(response) or ""
+                raw_path = self._save_raw_response(response, prompt, attempt)
+                response_text = text_content or "" # Use extracted text or fallback
 
                 return {
                     "success": True,
@@ -623,13 +651,14 @@ class GeminiClient:
 
                 # Handle different error types
                 error_str = str(e).lower()
-                if "quota" in error_str or "exhausted" in error_str or "429" in error_str:
+                if "quota" in error_str or "exhausted" in error_str or "429" in error_str or "rate limit" in error_str:
                     self._block_key(key_index, 600)  # Block for 10 minutes
-                elif "rate" in error_str or "limit" in error_str:
-                    self._block_key(key_index, 120)  # Block for 2 minutes
                 elif "safety" in error_str:
                     self.logger.warning(
                         f"Safety filter triggered for model {model}")
+                # If it's not a transient error, don't retry immediately
+                elif "max_tokens" in error_str or "incomplete" in error_str:
+                    pass # Let it proceed to max attempts if it's a truncation/incompleteness issue handled within the loop
 
                 if attempt < max_attempts - 1:
                     wait_time = backoff_with_jitter(attempt)

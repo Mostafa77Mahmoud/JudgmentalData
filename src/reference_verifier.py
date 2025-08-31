@@ -296,3 +296,52 @@ class ReferenceVerifier:
             "verification_method": "no_suitable_reference",
             "suspected_fabrication": False
         }
+
+    def verify_locally(self, reference: str, chunk_content: str) -> Tuple[bool, Dict]:
+        """Local verification using exact matching, token overlap, and semantic similarity"""
+
+        # Check for exact substring match
+        if reference.lower() in chunk_content.lower():
+            return True, {"exact_substring": True, "overlap": 1.0, "method": "exact"}
+
+        # Check token overlap
+        ref_tokens = set(reference.lower().split())
+        chunk_tokens = set(chunk_content.lower().split())
+
+        if len(ref_tokens) == 0:
+            return False, {"exact_substring": False, "overlap": 0.0, "method": "none"}
+
+        overlap = len(ref_tokens.intersection(chunk_tokens)) / len(ref_tokens)
+
+        # Require 85% overlap for verification
+        if overlap >= 0.85:
+            return True, {
+                "exact_substring": False,
+                "overlap": overlap,
+                "method": "token_overlap"
+            }
+
+        # Fallback: Basic semantic similarity using word overlap with lower threshold
+        # This helps with paraphrasing and different word forms
+        if overlap >= 0.6:  # Lower threshold for semantic similarity
+            # Check if key terms are present
+            ref_words = reference.lower().split()
+            chunk_words = chunk_content.lower().split()
+
+            # Count significant word matches (longer than 3 characters)
+            significant_ref = [w for w in ref_words if len(w) > 3]
+            significant_matches = sum(1 for w in significant_ref if any(w in cw or cw in w for cw in chunk_words))
+
+            if significant_ref and significant_matches / len(significant_ref) >= 0.7:
+                return True, {
+                    "exact_substring": False,
+                    "overlap": overlap,
+                    "semantic_score": significant_matches / len(significant_ref),
+                    "method": "semantic"
+                }
+
+        return False, {
+            "exact_substring": False,
+            "overlap": overlap,
+            "method": "failed"
+        }
