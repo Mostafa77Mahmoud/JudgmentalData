@@ -154,7 +154,7 @@ def knowledge_base_page():
                         with st.expander(f"Result {i} - Confidence: {result['confidence']:.2f}"):
                             st.markdown(f"**Standard:** {result.get('standard', 'N/A')}")
                             st.markdown(f"**Chunk ID:** {result['chunk_id']}")
-                            st.markdown(f"**Content:**")
+                            st.markdown("**Content:**")
                             st.text_area("", result['content'], height=150, disabled=True, key=f"result_{i}")
                             if result.get('reference'):
                                 st.markdown(f"**Reference:** {result['reference']}")
