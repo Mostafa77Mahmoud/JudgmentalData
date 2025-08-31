@@ -1,0 +1,10 @@
+{
+  "candidate_id": "8ce5c832-c2d9-4c59-adbf-4e5e62f4d6e0",
+  "claim": "تحرم مماطلة المدين القادر على وفاء الدين شرعاً.",
+  "chunk_excerpt": "ﻭﺍﻟﻠﻪ ﺍﻟﻤﻮﻓﻖ، ، ،\n\n(١) ﺍﺳــﺘﺨﺪﻣﺖ ﻛﻠﻤﺔ )ﺍﻟﻤﺆﺳﺴﺔ/ﺍﻟﻤﺆﺳﺴــﺎﺕ( ﺍﺧﺘﺼﺎ ﹰﹰﺭﺍ ﻋﻦ ﺍﻟﻤﺆﺳﺴﺎﺕ ﺍﻟﻤﺎﻟﻴﺔ ﺍﻹﺳﻼﻣﻴﺔ، ﻭﻣﻨﻬﺎ ﺍﻟﻤﺼﺎﺭﻑ ﺍﻹﺳﻼﻣﻴﺔ.\n\nﺍﻟﻤﻌﻴﺎﺭ ﺍﻟﺸﺮﻋﻲ ﺭﻗﻢ (٣) ﺍﻟﻤﺪﻳﻦ ﺍﻟﻤﻤﺎﻃﻞ\n\n-١ ﻧﻄﺎﻕ ﺍﻟﻤﻌﻴﺎﺭ:\n\nﻳﺘﻨﺎﻭﻝ ﻫــﺬﺍ ﺍﻟﻤﻌﻴﺎﺭ ﺍﻟﻤﺪﻳﻦ ﺍﻟﻤﻠــﻲﺀ ﺍﻟﻤﻤﺎﻃﻞ، ﻭﺍﻟﻜﻔﻴــﻞ ﺍﻟﻤﻠﻲﺀ ﺍﻟﻤﻤﺎﻃﻞ، ﻭﺍﻟﻤﻘــﺎﻭﻝ ﺃﻭ ﺍﻟﻤﺘﻌﻬﺪ ﺍﻟﺬﻱ ﻳﺘﺄﺧﺮ ﻋــﻦ ﺗﻨﻔﻴﺬ ﺍﻟﻌﻤﻞ ﻓﻴﺼﻴﺮ ﻣﺪﻳﻨﹰﹰﺎ ﺑﻤﻘﺘﻀﻰ ﺍﻟﺸــﺮﻁ ﺍﻟﺠﺰﺍﺋﻲ .\n\nﻭﻻ ﻳﺘﻨﺎﻭﻝ ﺍﻟﻤﻌﻴﺎﺭ ﺍﻟﻤﺪﻳﻦ ﺍﻟﻤﻌﺴــﺮ ﺃﻭ ﺍﻟﻤﻔﻠﺲ، ﻭﺍﻟﻤﺪﻳﻦ ﺍﻟﻤﺘﺄﺧﺮ ﻋﻦ ﺳــﺪﺍﺩ ﺍﻟﺪﻳﻦ ﻟﻌﺬﺭ ﺷﺮﻋﻲ.\n\n-٢ ﺍﻟﺤﻜﻢ ﺍﻟﺸﺮﻋﻲ:\n\n١/٢ ﺍﻟﻤﺪﻳﻦ ﺍﻟﻤﻤﺎﻃﻞ:\n\n١/١/٢ ﺗﺤﺮﻡ ﻣﻤﺎﻃﻠﺔ ﺍﻟﻤﺪﻳﻦ ﺍﻟﻘﺎﺩ",
+  "raw_response_path": "unknown",
+  "model_used": "models/gemini-2.5-pro",
+  "key_index": 0,
+  "timestamp": 1756644172.6342356,
+  "error": "Attempt 1: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-pro'}, 'quotaValue': '50'}]}, {'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '7s'}]}}"
+}

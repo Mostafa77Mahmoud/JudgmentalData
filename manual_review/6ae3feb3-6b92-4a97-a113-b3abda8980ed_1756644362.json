@@ -1,0 +1,10 @@
+{
+  "candidate_id": "6ae3feb3-6b92-4a97-a113-b3abda8980ed",
+  "claim": "الغرر هو ما يؤدي إلى النزاع في العقد، ومن أمثلته بيع حبل الحبلة، والمقصود به تأجيل ثمن المبيع إلى أجل غير مسمى، مثل أن تلد الناقة ويلد ما في بطنها.",
+  "chunk_excerpt": " ﻣﺴﺘﻨﺪ ﻓﺴﺎﺩ ﺍﻟﻌﻘﺪ ﺍﻟﻤﺠﻬﻮﻝ ﺃﺟﻠﻪ ﺃﻥ ﺫﻟﻚ ﻳﺆﺩﻱ ﻟﻠﻨﺰﺍﻉ، ﻭﻗﺪ ﻭﺭﺩ ﺍﻟﻨﻬﻲ ﻋﻦ ﺑﻴﻊ ﺣﺒﻞ ﺍﻟﺤﺒﻠﺔ ﻭﺍﻟﻤﺮﺍﺩ ﺑﻪ ﺗﺄﺟﻴﻞ ﺛﻤﻦ ﺍﻟﻤﺒﻴﻊ ﺇﻟﻰ ﺃﻥ ﺗﻠﺪ ﺍﻟﻨﺎﻗﺔ ﻭﻳﻠﺪ ﻣﺎ ﻭﻟﺪﺗﻪ. ﻭﻗﺪ ﻭﺻﻔﺖ ﺍﻟﻤﺪﺍﻳﻨﺔ ﺍﻟﻤﺸﺮﻭﻋﺔ ﺑﺄﻥ ﺃﺟﻠﻬﺎ ﻣﺴﻤﻰ ﱹ ! \" # $\n\n.(٢)ﱸ * ) ( ' & %\n\n ﻣﺴﺘﻨﺪ ﻓﺴﺎﺩ ﺍﻟﻌﻘﺪ ﻏﻴﺮ ﺍﻟﻤﻘﺪﻭﺭ ﻋﻠﻰ ﺗﺴﻠﻴﻢ ﺍﻟﻤﻌﻘﻮﺩ ﻋﻠﻴﻪ ﻓﻴﻪ ﻫﻮ ﻣﺎ ﻓﻴﻪ ﻣﻦ ﺍﻟﻐﺮﺭ ﺍﻟﻜﺜﻴﺮ؛ ﻷﻥ ﺍﻟﻤﻘﺼﻮﺩ ﻣﻦ ﺍﻟﻌﻘﻮﺩ )ﻣﻘﺘﻀﻰ ﻋﻘﺪ ﺍﻟﺒﻴﻊ( ﺗﺤﺼﻴﻞ ﻣﺤﻠﻬﺎ ﻟﻠﺒﺎﺋﻊ ﻭﺍﻟﻤﺸﺘﺮﻱ ﻋﻠﻰ ﺍﻟﺴﻮﺍﺀ، ﻓﺈﺫﺍ ﺣﺼﻞ ﺍﻟﺜﻤﻦ ﻟﻠﺒﺎﺋﻊ ﻭﻟﻢ ﻳﺤﺼﻞ ﺍﻟﻤﺒﻴﻊ ﻟﻠﻤﺸﺘﺮﻱ ﻳﺨﺘﻞ ﺫﻟﻚ ﺍﻟﻤﻘﺘﻀﻰ ﻭﺍﻟﻤﻘﺼﻮﺩ ﻣﻦ ﺍﻟﻌﻘﺪ.\n\n ﻣﺴﺘﻨﺪ ﻓﺴﺎﺩ ﺑﻴﻊ ﺍﻹﻧﺴﺎﻥ ﻣﺎ ﻟﻴﺲ ﻋﻨﺪﻩ ",
+  "raw_response_path": "unknown",
+  "model_used": "models/gemini-2.5-pro",
+  "key_index": 0,
+  "timestamp": 1756644362.9552605,
+  "error": "Attempt 5: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-pro'}, 'quotaValue': '50'}]}, {'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '57s'}]}}"
+}

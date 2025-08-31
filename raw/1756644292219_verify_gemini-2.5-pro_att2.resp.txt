@@ -1,0 +1,19 @@
+sdk_http_response=HttpResponse(
+  headers=<dict len=10>
+) candidates=[Candidate(
+  content=Content(
+    role='model'
+  ),
+  finish_reason=<FinishReason.MAX_TOKENS: 'MAX_TOKENS'>,
+  index=0
+)] create_time=None model_version='gemini-2.5-pro' prompt_feedback=None response_id='xEO0aNLADNLK-8YPufmngAc' usage_metadata=GenerateContentResponseUsageMetadata(
+  prompt_token_count=9396,
+  prompt_tokens_details=[
+    ModalityTokenCount(
+      modality=<MediaModality.TEXT: 'TEXT'>,
+      token_count=9396
+    ),
+  ],
+  thoughts_token_count=1023,
+  total_token_count=10419
+) automatic_function_calling_history=[] parsed=None
