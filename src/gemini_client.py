@@ -590,6 +590,17 @@ class GeminiClient:
         self.current_key_index = 0
         self.models = self._load_models()
         self.key_manager = APIKeyManager(self.api_keys) if self.api_keys else None
+        
+        # Initialize key state tracking
+        import threading
+        self.lock = threading.Lock()
+        self.key_states = {}
+        current_time = int(time.time())
+        for i in range(len(self.api_keys)):
+            self.key_states[i] = {
+                "blocked_until": current_time,
+                "requests_made": 0
+            }
 
         # Configure the primary key
         if self.api_keys:
@@ -672,6 +683,28 @@ class GeminiClient:
             logger.warning(f"Failed to save raw response: {e}")
             return None
 
+    def _get_next_available_key(self) -> Tuple[Optional[str], Optional[int]]:
+        """Get next available API key"""
+        with self.lock:
+            current_time = int(time.time())
+            
+            # Try to find an available key
+            for i in range(len(self.api_keys)):
+                key_index = (self.current_key_index + i) % len(self.api_keys)
+                if self.key_states[key_index]["blocked_until"] <= current_time:
+                    self.current_key_index = (key_index + 1) % len(self.api_keys)
+                    return self.api_keys[key_index], key_index
+            
+            # No available keys
+            return None, None
+
+    def _block_key(self, key_index: int, duration_seconds: int):
+        """Block a key for a specified duration"""
+        with self.lock:
+            block_until = int(time.time()) + duration_seconds
+            self.key_states[key_index]["blocked_until"] = block_until
+            logger.warning(f"Blocked key {key_index} until {block_until}")
+
 
     def call_model(self,
                    prompt: str,
@@ -687,7 +720,7 @@ class GeminiClient:
             "gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"
         ]
         if model not in available_models:
-            self.logger.warning(
+            logger.warning(
                 f"Model {model} not in available list, using first available model"
             )
             model = available_models[0]
@@ -709,7 +742,7 @@ class GeminiClient:
                     # Check input token estimate
                     estimated_input_tokens = len(prompt) // 3  # Rough estimate
                     if estimated_input_tokens > MAX_INPUT_TOKENS:
-                        self.logger.warning(f"Input tokens ({estimated_input_tokens}) may exceed limit ({MAX_INPUT_TOKENS})")
+                        logger.warning(f"Input tokens ({estimated_input_tokens}) may exceed limit ({MAX_INPUT_TOKENS})")
 
                     start_time = time.time()
                     response = client.models.generate_content(
@@ -749,11 +782,24 @@ class GeminiClient:
                         if "MAX_TOKENS" in str(finish_reason).upper() and auto_retry_truncation and attempt < max_attempts - 1:
                             if max_tokens < MAX_OUTPUT_TOKENS:
                                 new_max_tokens = min(MAX_OUTPUT_TOKENS, max_tokens * 2)
-                                self.logger.info(f"Truncated - increasing max_output_tokens from {max_tokens} to {new_max_tokens}")
+                                logger.info(f"Truncated - increasing max_output_tokens from {max_tokens} to {new_max_tokens}")
                                 # Use the current key and retry with increased tokens
                                 return self.call_model(prompt, model, new_max_tokens, temperature, max_attempts, auto_retry_truncation)
                             else:
-                                self.logger.warning("Truncated even at maximum allowed tokens - consider splitting request")
+                                logger.warning("Truncated even at maximum allowed tokens - consider splitting request")</error_str>
+
+                        error_msg = f"Model finished with reason: {finish_reason}. Response may be incomplete or blocked."
+                        self.logger.warning(error_msg)</old_str>
+<new_str>                            if max_tokens < MAX_OUTPUT_TOKENS:
+                                new_max_tokens = min(MAX_OUTPUT_TOKENS, max_tokens * 2)
+                                logger.info(f"Truncated - increasing max_output_tokens from {max_tokens} to {new_max_tokens}")
+                                # Use the current key and retry with increased tokens
+                                return self.call_model(prompt, model, new_max_tokens, temperature, max_attempts, auto_retry_truncation)
+                            else:
+                                logger.warning("Truncated even at maximum allowed tokens - consider splitting request")
+
+                        error_msg = f"Model finished with reason: {finish_reason}. Response may be incomplete or blocked."
+                        logger.warning(error_msg)
 
                         error_msg = f"Model finished with reason: {finish_reason}. Response may be incomplete or blocked."
                         self.logger.warning(error_msg)
@@ -794,7 +840,7 @@ class GeminiClient:
                 }
 
             except Exception as e:
-                self.logger.error(
+                logger.error(
                     f"Error with key {key_index}, attempt {attempt + 1}: {e}")
 
                 # Save error details for analysis
@@ -813,7 +859,7 @@ class GeminiClient:
                 if "quota" in error_str or "exhausted" in error_str or "429" in error_str or "rate limit" in error_str:
                     self._block_key(key_index, 600)  # Block for 10 minutes
                 elif "safety" in error_str:
-                    self.logger.warning(
+                    logger.warning(
                         f"Safety filter triggered for model {model}")
                 # If it's not a transient error, don't retry immediately
                 elif "max_tokens" in error_str or "incomplete" in error_str:
