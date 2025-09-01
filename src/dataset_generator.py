@@ -194,9 +194,10 @@ Return ONLY valid JSON without any additional text:
 
                 result = self.gemini_client.call_model(
                     prompt=prompt,
-                    model="gemini-2.5-flash",
-                    max_tokens=20000,  # Increased from 6000
-                    temperature=0.3,
+                    model="gemini-2.5-flash", 
+                    max_tokens=40000,  # Increased to avoid truncation
+                    temperature=0.0,   # Deterministic output
+                    top_p=0.0,        # No randomness
                     auto_retry_truncation=True
                 )
 
@@ -575,11 +576,12 @@ Return ONLY valid JSON without any additional text:
             'samples': final_claims[:3] if final_claims else []
         }
 
-    def _generate_claims_from_chunk(self, chunk, language, max_claims=3):
+    def _generate_claims_from_chunk(self, chunk, language, max_claims=1):
         """Generate claims from a single chunk of text."""
         try:
-            # Import prompts
+            # Import prompts and post-check
             from src.prompts import ARABIC_GENERATOR_PROMPT, ENGLISH_GENERATOR_PROMPT
+            from src.post_check import mark_fabrication_if_invalid
             
             # Get the appropriate prompt - strict mode
             if language == "ar":
@@ -595,21 +597,37 @@ Return ONLY valid JSON without any additional text:
                     uuid=self._generate_uuid()
                 )
 
-            response = self.client.generate_content(
-                prompt,
-                generation_config={
-                    "temperature": 0.0,
-                    "top_p": 0.0,
-                    "max_output_tokens": 12000
-                }
+            response = self.gemini_client.call_model(
+                prompt=prompt,
+                model="gemini-2.5-flash",
+                max_tokens=40000,
+                temperature=0.0,
+                top_p=0.0
             )
             
-            if not response or not response.text:
-                self.logger.warning(f"Empty response received for chunk {chunk.get('id', 0)}")
+            if not response.get("success"):
+                self.logger.warning(f"Failed response for chunk {chunk.get('id', 0)}: {response.get('error')}")
                 return []
 
-            # Parse the response
-            claims = robust_parse_json_array(response.text)
+            # Check for truncation
+            if response.get("finish_reason") == "MAX_TOKENS":
+                self.logger.warning(f"Response truncated for chunk {chunk.get('id', 0)}")
+                return []
+
+            # Parse the response - expecting single JSON object
+            raw_text = response.get("raw_text", "")
+            try:
+                if raw_text.strip() == "{}":
+                    return []  # Model couldn't generate valid claim
+                    
+                claim = json.loads(raw_text.strip())
+                if not isinstance(claim, dict):
+                    return []
+                    
+                claims = [claim]
+            except json.JSONDecodeError:
+                self.logger.warning(f"Invalid JSON from chunk {chunk.get('id', 0)}")
+                return []
             
             # Ensure claims conform to expected structure and add metadata
             processed_claims = []
@@ -629,6 +647,9 @@ Return ONLY valid JSON without any additional text:
                 if "context_excerpt" in claim and len(claim["context_excerpt"]) > self.context_max_chars:
                     claim["context_excerpt"] = claim["context_excerpt"][:self.context_max_chars]
 
+                # Apply post-check validation
+                claim = mark_fabrication_if_invalid(claim, chunk.get('text', ''))
+                
                 # Limit the number of claims generated per chunk
                 if len(processed_claims) < max_claims:
                     processed_claims.append(claim)

@@ -50,6 +50,8 @@ import logging
 import os
 import threading
 import re
+import itertools
+import gzip
 from typing import List, Dict, Optional, Tuple, Any, Union
 from pathlib import Path
 
@@ -581,65 +583,95 @@ def batch_verify_single(items: List[Dict]) -> List[Dict]:
 class GeminiClient:
     """Production-ready Gemini client with load balancing and failover"""
 
-    def __init__(self, config_file: str = None):
-        self.logger = logging.getLogger(__name__)
-        self.lock = threading.Lock()
-        self.api_keys = API_KEYS
+    def __init__(self, config_path: str = "config/keys.json"):
+        """Initialize Gemini client with API keys"""
+        self.config_path = config_path
+        self.api_keys = self._load_api_keys()
         self.current_key_index = 0
-        self.key_states = {
-            i: {
-                "blocked_until": 0,
-                "requests_made": 0
-            }
-            for i in range(len(self.api_keys))
-        }
-        Path("raw").mkdir(exist_ok=True)
-        self.client = None
+        self.models = self._load_models()
+        self.key_manager = APIKeyManager(self.api_keys) if self.api_keys else None
 
-    def _get_next_available_key(self) -> Tuple[Optional[str], int]:
-        """Get next available API key"""
-        with self.lock:
-            current_time = int(time.time())
+        # Configure the primary key
+        if self.api_keys:
+            genai.configure(api_key=self.api_keys[0])
 
-            for i in range(len(self.api_keys)):
-                next_index = (self.current_key_index + i) % len(self.api_keys)
-                if self.key_states[next_index][
-                        "blocked_until"] <= current_time:
-                    self.current_key_index = next_index
-                    return self.api_keys[next_index], next_index
+        logger.info(f"Loaded {len(self.api_keys)} unique API keys")
+        logger.info(f"Loaded {len(self.models)} models from config: {list(self.models.keys())}")
 
-            return None, -1
-
-    def _block_key(self, key_index: int, duration: int = 300):
-        """Block a key for specified duration"""
-        with self.lock:
-            self.key_states[key_index]["blocked_until"] = int(
-                time.time()) + duration
-            self.logger.warning(f"Blocked key {key_index} for {duration}s")
-
-    def _save_raw_response(self, response_data: Dict, model_name: str, attempt: int) -> str:
-        """Save raw response for analysis"""
-        timestamp = int(time.time() * 1000)
-        filename = f"raw/{timestamp}_{model_name.replace('/', '_')}_att{attempt}.resp.json"
-
-        # Ensure raw directory exists
-        Path("raw").mkdir(exist_ok=True)
+    def _load_api_keys(self) -> List[str]:
+        """Load API keys from config file"""
+        if not os.path.exists(self.config_path):
+            logger.warning(f"Config file not found: {self.config_path}")
+            return []
 
         try:
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(response_data, f, ensure_ascii=False, indent=2)
+            with open(self.config_path, "r") as f:
+                config = json.load(f)
+                keys = config.get("api_keys", [])
+                if not isinstance(keys, list):
+                    logger.error("Invalid 'api_keys' format in config file.")
+                    return []
+                # Ensure keys are unique and not empty
+                unique_keys = list(set(k for k in keys if k and isinstance(k, str)))
+                if len(unique_keys) != len(keys):
+                    logger.warning("Duplicate or invalid API keys found and removed.")
+                return unique_keys
+        except json.JSONDecodeError:
+            logger.error(f"Failed to decode JSON from config file: {self.config_path}")
+            return []
         except Exception as e:
-            self.logger.error(f"Failed to save raw response to {filename}: {e}")
-            # Try saving as text if JSON fails
-            try:
-                with open(filename.replace('.json', '.txt'), 'w', encoding='utf-8') as f:
-                    f.write(str(response_data))
-                filename = filename.replace('.json', '.txt')
-            except Exception as e_txt:
-                self.logger.error(f"Failed to save raw response as text to {filename.replace('.json', '.txt')}: {e_txt}")
+            logger.error(f"Error loading API keys from {self.config_path}: {e}")
+            return []
 
+    def _load_models(self) -> Dict[str, Dict]:
+        """Load model configurations from config file"""
+        if not os.path.exists(self.config_path):
+            logger.warning(f"Config file not found: {self.config_path}")
+            return {}
 
-        return filename
+        try:
+            with open(self.config_path, "r") as f:
+                config = json.load(f)
+                models = config.get("models", {})
+                if not isinstance(models, dict):
+                    logger.error("Invalid 'models' format in config file.")
+                    return {}
+                return models
+        except json.JSONDecodeError:
+            logger.error(f"Failed to decode JSON from config file: {self.config_path}")
+            return {}
+        except Exception as e:
+            logger.error(f"Error loading models from {self.config_path}: {e}")
+            return {}
+
+    def _safe_filename(self, prefix, model):
+        """Generate safe filename for raw responses"""
+        ts = int(time.time() * 1000)
+        model_safe = re.sub(r'[^A-Za-z0-9_.-]', '_', model)
+        return f"raw/{ts}_{model_safe}.resp.json.gz"
+
+    def _save_raw_response(self, prompt, response_text, model_name, finish_reason=None):
+        """Save raw response to file for debugging"""
+        filename = self._safe_filename("resp", model_name)
+
+        try:
+            os.makedirs("raw", exist_ok=True)
+            response_obj = {
+                "prompt": prompt[:1000],  # Limited prompt for reference
+                "response": response_text,
+                "model": model_name,
+                "timestamp": time.time(),
+                "finish_reason": finish_reason
+            }
+
+            import gzip
+            with gzip.open(filename, "wt", encoding="utf-8") as f:
+                json.dump(response_obj, f, ensure_ascii=False, indent=2)
+            return filename
+        except Exception as e:
+            logger.warning(f"Failed to save raw response: {e}")
+            return None
+
 
     def call_model(self,
                    prompt: str,

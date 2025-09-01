@@ -63,11 +63,28 @@ Return **JSON object only** with the following structure (no other text):
  "model_used":"gemini-2.5-flash"
 }}"""
 
-ARABIC_GENERATOR_PROMPT = """انت مُحرر/مولد بيانات (Dataset Generator). عندك فقط هذا النص (CONTEXT) — لا يُسمح لك بالرجوع لأي مصدر خارجي ولا بصنع مراجع. المطلوب:
-1) اقرأ CONTEXT بالتمام.
-2) استخرج حتى 3 ادعاءات قصيرة (claims) قابلة للتمييز عن CONTEXT، كل ادعاء يجب أن يكون:
-   - عبارة عن جملة واحدة قصيرة (≤30 كلمة).
-   - مشتقة مباشرة من CONTEXT (لا إضافات فكرية من عندك).
+ARABIC_GENERATOR_PROMPT = """أنت مولد بيانات حتمي. الإخراج يجب أن يكون JSON فقط.
+
+النص المرجعي: {context}
+
+التعليمات:
+- أنشئ ادعاء واحد فقط مشتق *مباشرة* من النص المرجعي
+- لكل ادعاء أدرج دليل واحد على الأقل يحتوي على:
+  - "start_char" و "end_char" (مواقع في النص، بدءاً من 0)
+  - "excerpt": substring دقيق من النص[start_char:end_char]، بحد أقصى 750 حرف
+- الادعاء يجب أن يكون ≤30 كلمة
+- الإخراج يجب أن يكون JSON object واحد بالضبط كما هو موضح أدناه:
+
+{{
+ "id":"{uuid}",
+ "language":"ar",
+ "claim":"<...>",
+ "context_chunk_id": {chunk_id},
+ "evidence":[{{"chunk_id":{chunk_id},"start_char":<int>,"end_char":<int>,"excerpt":"<...>"}}],
+ "generator_model":"gemini-2.5-flash"
+}}
+
+إذا لم تستطع إنتاج ادعاء بناءً بصرامة على النص المرجعي، أخرج: {{}}ندك).
 3) لكل ادعاء أدرج حقل evidence واحد على الأقل مأخوذ حرفياً من CONTEXT:
    - evidence.excerpt يجب أن يكون substring موجود حرفياً في CONTEXT وبحد أقصى 750 حرف.
    - evidence.start_char و evidence.end_char (مواقع في CONTEXT، 0-index).
@@ -85,9 +102,28 @@ ARABIC_GENERATOR_PROMPT = """انت مُحرر/مولد بيانات (Dataset Ge
 CONTEXT:
 {context}"""
 
-ENGLISH_GENERATOR_PROMPT = """You are a Dataset Generator. You have only this text (CONTEXT) — you are NOT allowed to reference any external sources or create references. Required:
-1) Read CONTEXT completely.
-2) Extract up to 3 short claims that can be distinguished from CONTEXT, each claim must be:
+ENGLISH_GENERATOR_PROMPT = """You are a deterministic data generator. OUTPUT MUST BE JSON ONLY.
+
+Context: {context}
+
+Instructions:
+- Generate exactly 1 claim derived *directly* from CONTEXT
+- For that claim include at least one evidence object with:
+  - "start_char" and "end_char" (0-indexed positions in CONTEXT)
+  - "excerpt": exact substring CONTEXT[start_char:end_char], max 750 chars
+- Claim must be ≤30 words
+- Output MUST be a single JSON object exactly as below:
+
+{{
+ "id":"{uuid}",
+ "language":"en",
+ "claim":"<...>",
+ "context_chunk_id": {chunk_id},
+ "evidence":[{{"chunk_id":{chunk_id},"start_char":<int>,"end_char":<int>,"excerpt":"<...>"}}],
+ "generator_model":"gemini-2.5-flash"
+}}
+
+If you cannot produce such claim based strictly on CONTEXT, output: {{}}ONTEXT, each claim must be:
    - A single short sentence (≤30 words).
    - Directly derived from CONTEXT (no intellectual additions from you).
 3) For each claim include at least one evidence field taken literally from CONTEXT:
