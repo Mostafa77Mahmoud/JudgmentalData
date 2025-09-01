@@ -244,7 +244,7 @@ def send_verify_request(model_name: str, api_key: str, items: List[Dict], lang: 
         # Check finish reason first
         if hasattr(response, 'candidates') and response.candidates:
             candidate = response.candidates[0]
-            if hasattr(candidate, 'finish_reason'):
+            if hasattr(candidate, 'finish_reason') and candidate.finish_reason is not None:
                 finish_reason = candidate.finish_reason
                 finish_reason_name = finish_reason.name if hasattr(finish_reason, 'name') else str(finish_reason)
 
@@ -261,7 +261,10 @@ def send_verify_request(model_name: str, api_key: str, items: List[Dict], lang: 
             # Fallback extraction
             if hasattr(response, 'candidates') and response.candidates:
                 candidate = response.candidates[0]
-                if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                if (hasattr(candidate, 'content') and 
+                    candidate.content is not None and 
+                    hasattr(candidate.content, 'parts') and 
+                    candidate.content.parts is not None):
                     texts = []
                     for part in candidate.content.parts:
                         if hasattr(part, 'text') and part.text:
@@ -669,14 +672,15 @@ class GeminiClient:
 
                 # Handle response with new SDK format
                 text_content = None
-                if response.candidates and len(response.candidates) > 0:
+                if hasattr(response, 'candidates') and response.candidates and len(response.candidates) > 0:
                     candidate = response.candidates[0]
 
                     # Check finish reason
                     finish_reason = getattr(candidate, 'finish_reason', None)
                     if finish_reason and finish_reason != 'STOP':
                         # Handle MAX_TOKENS with smart retry
-                        if "MAX_TOKENS" in str(finish_reason).upper() and attempt < max_attempts - 1:
+                        finish_reason_str = finish_reason.name if hasattr(finish_reason, 'name') else str(finish_reason)
+                        if "MAX_TOKENS" in finish_reason_str.upper() and attempt < max_attempts - 1:
                             if max_tokens < MAX_OUTPUT_TOKENS:
                                 new_max_tokens = min(MAX_OUTPUT_TOKENS, max_tokens * 2)
                                 logger.info(f"Truncated - increasing max_output_tokens from {max_tokens} to {new_max_tokens}")
@@ -685,22 +689,24 @@ class GeminiClient:
                             else:
                                 logger.warning("Truncated even at maximum allowed tokens - consider splitting request")
 
-                        error_msg = f"Model finished with reason: {finish_reason}. Response may be incomplete or blocked."
+                        error_msg = f"Model finished with reason: {finish_reason_str}. Response may be incomplete or blocked."
                         logger.warning(error_msg)
                         raw_path = self._save_raw_response(response, prompt, attempt)
 
                         # If it's truncation, still return partial content if available
-                        if "MAX_TOKENS" in str(finish_reason).upper():
+                        if "MAX_TOKENS" in finish_reason_str.upper():
                             # Try to extract partial content
                             pass  # Continue to text extraction below
                         else:
                             raise Exception(f"{error_msg} Raw response saved to: {raw_path}")
 
                     # Extract text from new SDK response format
-                    if hasattr(candidate, 'content') and candidate.content and hasattr(candidate.content, 'parts'):
-                        if candidate.content.parts:
-                            text_parts = [part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text]
-                            text_content = "\n".join(text_parts)
+                    if (hasattr(candidate, 'content') and 
+                        candidate.content is not None and 
+                        hasattr(candidate.content, 'parts') and 
+                        candidate.content.parts is not None):
+                        text_parts = [part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text]
+                        text_content = "\n".join(text_parts)
 
                 # Fallback to response.text if available
                 if not text_content and hasattr(response, 'text'):
@@ -739,7 +745,8 @@ class GeminiClient:
                 # Handle different error types
                 error_str = str(e).lower()
                 if "quota" in error_str or "exhausted" in error_str or "429" in error_str or "rate limit" in error_str:
-                    self._block_key(key_index, 600)  # Block for 10 minutes
+                    if key_index is not None:
+                        self._block_key(key_index, 600)  # Block for 10 minutes
                 elif "safety" in error_str:
                     logger.warning(f"Safety filter triggered for model {model}")
 
