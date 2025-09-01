@@ -785,8 +785,7 @@ class GeminiClient:
                                 logger.info(f"Truncated - increasing max_output_tokens from {max_tokens} to {new_max_tokens}")
                                 # Use the current key and retry with increased tokens
                                 return self.call_model(prompt, model, new_max_tokens, temperature, max_attempts, auto_retry_truncation)
-                            else:
-                                logger.warning("Truncated even at maximum allowed tokens - consider splitting request")</error_str>
+                            else:                               logger.warning("Truncated even at maximum allowed tokens - consider splitting request")</error_str>
 
                         error_msg = f"Model finished with reason: {finish_reason}. Response may be incomplete or blocked."
                         self.logger.warning(error_msg)</old_str>
