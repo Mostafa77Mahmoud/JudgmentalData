@@ -1,0 +1,195 @@
+للّوجات. واضحين مشكلتان أساسيتان: (1) الـ responses تُحفَظ باسم ملف طويل جدًا فتفشل عملية الحفظ، و(2) كل الأمثلة اتعلّمت كـ “fabricated / Unknown” لأن الـ pipeline يسمح للنموذج بالاختلاق أو لا يطبّق تحقق صارم (evidence indices/substring checks). تحت — خطة إصلاح عملية، مع شفرات جاهزة تلصقها فورًا.
+
+ملخّص المشكلة من اللوجز
+
+خطأ File name too long عند حفظ raw response لأنك تستخدم النص الكامل للـ prompt في اسم الملف. -> يؤدي لخسارة الرد الخام وتحليل ناقص.
+
+المولد يُرجع ادعاءات بدون evidence مطابقة (أو بدون start/end)، وفحصنا الآلي يعلّمها fabricated لأن evidence غير كافٍ أو غير صحيح.
+
+finish_reason=MAX_TOKENS ظهر في لوجات سابقة → الرد مقطوع وربما JSON غير صالح.
+
+خطوات إصلاح فورية (ترتيب تنفيذ مقترح)
+
+إصلاح حفظ الردود الخام — استخدم اسم ملف قصير وموحّد (timestamp + model + attempt).
+
+إلزام النموذج بإخراج JSON صارم (JSON-only) مع start_char و end_char و excerpt وحقل chunk_id.
+
+فحص برمجي صارم بعد الإخراج:
+
+تحقق أن excerpt == context[start_char:end_char] حرفياً.
+
+تأكد أن 0 <= start_char < end_char <= len(context).
+
+إن فشل أي تحقق اعتبر العنصر fabricated.
+
+خفض عدد الادعاءات المولدة: 1 claim per chunk (حتى يتحسن معدل الجودة).
+
+ضبط إعدادات النداء للنموذج: temperature=0, top_p=0, وزيادة max_output_tokens لتجنّب MAX_TOKENS (مثلاً 60000 أو 40000 — حسب سياسة الحساب).
+
+التعامل مع truncation: إذا finish_reason==MAX_TOKENS — احفظ الرد الخام، وعاود الطلب مع max_output_tokens أكبر أو قسّم chunk.
+
+إدارة مفاتيح الـ API: round-robin، وعَلّم key كمشاكل عند 401/429 وقلّل الحمل عليه.
+
+Logging أفضل: سجّل finish_reason واسم الملف المختصر ومعلومة إذا كان JSON صالح.
+
+أمثلة كود (انسخها واضعها مكان المناسب في repo)
+1) وظيفة sanitise لحفظ raw responses (بايثون)
+import re, time, json, gzip, os
+
+def safe_filename(prefix, model):
+    ts = int(time.time()*1000)
+    model_safe = re.sub(r'[^A-Za-z0-9_.-]', '_', model)
+    return f"raw/{ts}_{model_safe}.resp.json.gz"
+
+def save_raw_response(resp_obj, model):
+    fn = safe_filename("resp", model)
+    os.makedirs("raw", exist_ok=True)
+    with gzip.open(fn, "wt", encoding="utf-8") as f:
+        json.dump(resp_obj, f, ensure_ascii=False)
+    return fn
+
+
+لا تضع الـ prompt الكامل كاسم ملف أبداً.
+
+2) نداء Gemini موحّد مع rotation للـ keys
+import httpx, itertools, time
+
+class APIKeyManager:
+    def __init__(self, keys):
+        self.keys = keys
+        self._iter = itertools.cycle(keys)
+        self.blacklist = {}
+
+    def get_key(self):
+        # loop until available key
+        for _ in range(len(self.keys)):
+            k = next(self._iter)
+            if k not in self.blacklist or time.time() - self.blacklist[k] > 300:
+                return k
+        raise RuntimeError("No available API key")
+
+    def mark_bad(self, key, penalty_seconds=600):
+        self.blacklist[key] = time.time() + penalty_seconds
+
+key_mgr = APIKeyManager(["KEY1", "KEY2", "KEY3", "KEY4"])
+
+def call_gemini(payload, model="gemini-2.5-flash", timeout=120, max_attempts=3):
+    for attempt in range(max_attempts):
+        key = key_mgr.get_key()
+        headers = {"Authorization": f"Bearer {key}", "Content-Type":"application/json"}
+        try:
+            r = httpx.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                headers=headers, json=payload, timeout=timeout
+            )
+            if r.status_code in (429, 500, 502, 503, 504):
+                key_mgr.mark_bad(key, penalty_seconds=60*(attempt+1))
+                continue
+            r.raise_for_status()
+            return r.json()
+        except httpx.HTTPError:
+            key_mgr.mark_bad(key, penalty_seconds=300)
+            continue
+    raise RuntimeError("All attempts failed")
+
+3) برومبت صارم للـ Generator (عربي) — ضع فقط الـ chunk في prompt_context
+SYSTEM:
+You are a deterministic data generator. OUTPUT MUST BE JSON ONLY.
+
+USER:
+ContextChunk: <<<CONTEXT>>>
+
+Instructions:
+- Generate exactly 1 claim derived *directly* from CONTEXT.
+- For that claim include at least one evidence object with:
+  - "start_char" and "end_char" (0-indexed positions in CONTEXT)
+  - "excerpt": exact substring CONTEXT[start_char:end_char], max 750 chars.
+- Claim must be ≤30 words.
+- Output MUST be a single JSON object exactly as below:
+
+{
+ "id":"<uuid>",
+ "language":"ar",
+ "claim":"<...>",
+ "context_chunk_id": <int>,
+ "evidence":[{"chunk_id":<int>,"start_char":<int>,"end_char":<int>,"excerpt":"<...>"}],
+ "generator_model":"gemini-2.5-flash"
+}
+
+If you cannot produce such claim based strictly on CONTEXT, output: {}
+
+
+إعدادات call: temperature=0.0, top_p=0.0, max_output_tokens=40000 (عدل حسب حسابك).
+
+4) برومبت صارم للـ Verifier
+SYSTEM:
+You are a strict verifier. JSON ONLY.
+
+USER:
+CONTEXT: <<<CONTEXT>>>
+CLAIM: "<CLAIM_TEXT>"
+
+Decide: True|False|Unknown based ONLY on CONTEXT.
+Return EXACT JSON:
+
+{
+ "id":"<same id>",
+ "verdict":"True|False|Unknown",
+ "evidence":[{"chunk_id":<int>,"start_char":<int>,"end_char":<int>,"excerpt":"<...>"}],
+ "explanation":"<=60 words, only cite context",
+ "confidence":0.0-1.0,
+ "suspected_fabrication": true|false,
+ "model_used":"gemini-2.5-flash"
+}
+
+Rules:
+- If no exact substring in CONTEXT supports the claim, set suspected_fabrication=true and verdict="Unknown".
+- evidence[] may be empty only if suspected_fabrication=true.
+
+
+Verifier settings: temperature=0, top_p=0, max_output_tokens=4000.
+
+5) Post-check صارم (Python): يتحقق من صحة evidence
+def post_check_item(item, context_text):
+    # item = dict from generator or verifier
+    evidences = item.get("evidence", [])
+    for ev in evidences:
+        s,e = ev.get("start_char"), ev.get("end_char")
+        if not (isinstance(s,int) and isinstance(e,int) and 0<=s<e<=len(context_text)):
+            return False, "bad_indices"
+        excerpt = context_text[s:e]
+        if excerpt != ev.get("excerpt"):
+            return False, "excerpt_mismatch"
+        if len(excerpt) > 750:
+            return False, "excerpt_too_long"
+    # if all checks pass
+    return True, "ok"
+
+
+استعمل post_check_item بعد كل رد واحكم suspected_fabrication=true إذا فشل.
+
+إعدادات مقترحة (قيم مبدئية)
+
+generator: temperature=0, top_p=0, max_output_tokens=40000, 1 claim per chunk.
+
+verifier: temperature=0, top_p=0, max_output_tokens=4000.
+
+smoke test أولي: 10 chunks فقط.
+
+معالجة حالة finish_reason==MAX_TOKENS
+
+دوّن finish_reason. إذا كانت MAX_TOKENS:
+
+احفظ الرد الخام (باستخدام save_raw_response).
+
+أعد المحاولة مع max_output_tokens أعلى أو قسّم chunk إلى نصفين وأعد توليد كل نصف.
+
+لا تعتمد على الرد المقطوع؛ اعتبره غير صالح حتى تستعيد JSON صالح.
+
+لماذا هذه الخطوات ستحسّن معدل الاختلاق؟
+
+إجبار النموذج على إعطاء start_char/end_char ويُفحص برمجياً يمنع أي ادعاء لا يعتمد على substring حقيقي.
+
+temperature=0 و top_p=0 يقللان الاختلاق.
+
+حفظ الرد الخام بأسماء سليمة يمنع فقدان البيانات لمراجعة الأخطاء (لن تفقد raw responses بسبب خطأ اسم ملف)
