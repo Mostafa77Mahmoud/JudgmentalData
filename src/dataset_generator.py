@@ -197,7 +197,6 @@ Return ONLY valid JSON without any additional text:
                     model="gemini-2.5-flash", 
                     max_tokens=40000,  # Increased to avoid truncation
                     temperature=0.0,   # Deterministic output
-                    top_p=0.0,        # No randomness
                     auto_retry_truncation=True
                 )
 
