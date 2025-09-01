@@ -8,6 +8,7 @@ src/gemini_client.py
 src/gemini_config.py
 src/knowledge_base.py
 src/parse_utils.py
+src/post_check.py
 src/prompts.py
 src/reference_verifier.py
 src/token_utils.py
