@@ -1,3 +1,144 @@
+import time
+import random
+import json
+import logging
+import os
+import threading
+import re
+import itertools
+import gzip
+from typing import List, Dict, Optional, Tuple, Any, Union
+from pathlib import Path
+
+# Use Google GenAI SDK
+try:
+    from google import genai
+    from google.genai import types
+    USE_NEW_SDK = True
+except ImportError:
+    raise ImportError("google-genai is required. Install with: pip install google-genai")
+
+from src.gemini_config import API_KEYS, MODELS, BATCH_SIZE, MAX_RETRIES, CONTEXT_MAX_CHARS, VERIFIER_MODEL, VERIFIER_TEMPERATURE, MAX_OUTPUT_TOKENS, MAX_INPUT_TOKENS, VERIFICATION_OUTPUT_TOKENS
+
+# Add missing constants
+INITIAL_BACKOFF = 1.0
+MAX_BACKOFF = 60.0
+
+logger = logging.getLogger(__name__)
+Path("raw").mkdir(parents=True, exist_ok=True)
+Path("manual_review").mkdir(parents=True, exist_ok=True)
+
+
+class NoTextPartsError(Exception):
+    """Raised when no textual parts found in API response"""
+    pass
+
+
+class APIKeyManager:
+    """Simple API key manager for rotation"""
+    def __init__(self, keys: List[str]):
+        self.keys = keys
+        self.current_index = 0
+        self.lock = threading.Lock()
+
+    def get_next_key(self) -> str:
+        with self.lock:
+            key = self.keys[self.current_index]
+            self.current_index = (self.current_index + 1) % len(self.keys)
+            return key
+
+
+def save_raw_response(response_obj: Any,
+                      model_name: str = "unknown_model",
+                      attempt: int = 0) -> str:
+    """Save raw API response with better serialization"""
+    os.makedirs("raw", exist_ok=True)
+    ts = int(time.time() * 1000)
+    safe_name = model_name.replace("/", "_").replace("models_", "")
+    path = f"raw/{ts}_{safe_name}_att{attempt}.resp.json"
+
+    try:
+        with open(path, "w", encoding="utf8") as f:
+            # Handle the google-genai response format
+            if hasattr(response_obj, 'text'):
+                response_data = {
+                    "text": response_obj.text,
+                    "candidates": [],
+                    "usage_metadata": {}
+                }
+
+                # Extract candidates if available
+                if hasattr(response_obj, 'candidates') and response_obj.candidates:
+                    for candidate in response_obj.candidates:
+                        candidate_data = {
+                            "content": {
+                                "parts": []
+                            },
+                            "finish_reason": "UNKNOWN"
+                        }
+
+                        if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                            for part in candidate.content.parts:
+                                if hasattr(part, 'text'):
+                                    candidate_data["content"]["parts"].append({"text": part.text})
+
+                        if hasattr(candidate, 'finish_reason'):
+                            candidate_data["finish_reason"] = candidate.finish_reason.name if hasattr(candidate.finish_reason, 'name') else str(candidate.finish_reason)
+
+                        response_data["candidates"].append(candidate_data)
+
+                # Extract usage metadata if available
+                if hasattr(response_obj, 'usage_metadata'):
+                    usage = response_obj.usage_metadata
+                    response_data["usage_metadata"] = {
+                        "prompt_token_count": getattr(usage, 'prompt_token_count', 0),
+                        "candidates_token_count": getattr(usage, 'candidates_token_count', 0),
+                        "total_token_count": getattr(usage, 'total_token_count', 0)
+                    }
+            else:
+                response_data = {
+                    "error": "No text attribute",
+                    "raw": str(response_obj)
+                }
+
+            json.dump(response_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        # Fallback to plain text if JSON fails
+        try:
+            with open(path.replace(".json", ".txt"), "w", encoding="utf8") as f:
+                f.write(str(response_obj))
+            path = path.replace(".json", ".txt")
+        except Exception:
+            logger.error(f"Failed to save raw response: {e}")
+    return path
+
+
+def rotate_key(attempt_index: int) -> str:
+    """Rotate API keys"""
+    return API_KEYS[attempt_index % len(API_KEYS)]
+
+
+def backoff_with_jitter(attempt: int) -> float:
+    """Exponential backoff with jitter"""
+    base = min(2**attempt, MAX_BACKOFF)
+    jitter = base * 0.2 * (random.random() * 2 - 1)
+    return max(0.1, base + jitter)
+
+
+def validate_token_limits(prompt: str, max_output_tokens: int) -> Tuple[bool, str]:
+    """Validate that prompt and expected output are within token limits"""
+    # Rough estimation: 1 token ≈ 3-4 characters for mixed languages
+    estimated_input_tokens = len(prompt) // 3
+
+    if estimated_input_tokens > MAX_INPUT_TOKENS:
+        return False, f"Input tokens ({estimated_input_tokens}) exceed limit ({MAX_INPUT_TOKENS})"
+
+    if max_output_tokens > MAX_OUTPUT_TOKENS:
+        return False, f"Output tokens ({max_output_tokens}) exceed limit ({MAX_OUTPUT_TOKENS})"
+
+    return True, "OK"
+
+
 def extract_text_from_response(response) -> str:
     """Extract text from various response formats"""
     if not response:
@@ -43,170 +184,6 @@ def extract_text_from_response(response) -> str:
     return str(response)
 
 
-import time
-import random
-import json
-import logging
-import os
-import threading
-import re
-import itertools
-import gzip
-from typing import List, Dict, Optional, Tuple, Any, Union
-from pathlib import Path
-
-# Try new Google GenAI SDK first, fallback to old if needed
-try:
-    from google import genai
-    from google.genai import types
-    USE_NEW_SDK = True
-except ImportError:
-    try:
-        from google import genai
-        USE_NEW_SDK = False
-    except ImportError:
-        raise ImportError("Neither google-genai nor google-generativeai is available")
-
-from src.gemini_config import API_KEYS, MODELS, BATCH_SIZE, MAX_RETRIES, CONTEXT_MAX_CHARS, VERIFIER_MODEL, VERIFIER_TEMPERATURE, MAX_OUTPUT_TOKENS, MAX_INPUT_TOKENS, VERIFICATION_OUTPUT_TOKENS
-
-# Add missing constants
-INITIAL_BACKOFF = 1.0
-MAX_BACKOFF = 60.0
-
-logger = logging.getLogger(__name__)
-Path("raw").mkdir(parents=True, exist_ok=True)
-Path("manual_review").mkdir(parents=True, exist_ok=True)
-
-
-class NoTextPartsError(Exception):
-    """Raised when no textual parts found in API response"""
-    pass
-
-
-def save_raw_response(response_obj: Any,
-                      model_name: str = "unknown_model",
-                      attempt: int = 0) -> str:
-    """Save raw API response with better serialization"""
-    os.makedirs("raw", exist_ok=True)
-    ts = int(time.time() * 1000)
-    safe_name = model_name.replace("/", "_").replace("models_", "")
-    path = f"raw/{ts}_{safe_name}_att{attempt}.resp.json"
-
-    try:
-        with open(path, "w", encoding="utf8") as f:
-            # Handle the google-generativeai response format
-            if hasattr(response_obj, 'text'):
-                response_data = {
-                    "text": response_obj.text,
-                    "candidates": [],
-                    "usage_metadata": {}
-                }
-
-                # Extract candidates if available
-                if hasattr(response_obj,
-                           'candidates') and response_obj.candidates:
-                    for candidate in response_obj.candidates:
-                        candidate_data = {
-                            "content": {
-                                "parts": []
-                            },
-                            "finish_reason": "UNKNOWN"
-                        }
-
-                        if hasattr(candidate, 'content') and hasattr(
-                                candidate.content, 'parts'):
-                            for part in candidate.content.parts:
-                                if hasattr(part, 'text'):
-                                    candidate_data["content"]["parts"].append(
-                                        {"text": part.text})
-
-                        if hasattr(candidate, 'finish_reason'):
-                            candidate_data[
-                                "finish_reason"] = candidate.finish_reason.name if hasattr(
-                                    candidate.finish_reason, 'name') else str(
-                                        candidate.finish_reason)
-
-                        response_data["candidates"].append(candidate_data)
-
-                # Extract usage metadata if available
-                if hasattr(response_obj, 'usage_metadata'):
-                    usage = response_obj.usage_metadata
-                    response_data["usage_metadata"] = {
-                        "prompt_token_count":
-                        getattr(usage, 'prompt_token_count', 0),
-                        "candidates_token_count":
-                        getattr(usage, 'candidates_token_count', 0),
-                        "total_token_count":
-                        getattr(usage, 'total_token_count', 0)
-                    }
-            else:
-                response_data = {
-                    "error": "No text attribute",
-                    "raw": str(response_obj)
-                }
-
-            json.dump(response_data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        # Fallback to plain text if JSON fails
-        try:
-            with open(path.replace(".json", ".txt"), "w",
-                      encoding="utf8") as f:
-                f.write(str(response_obj))
-            path = path.replace(".json", ".txt")
-        except Exception:
-            logger.error(f"Failed to save raw response: {e}")
-    return path
-
-
-def rotate_key(attempt_index: int) -> str:
-    """Rotate API keys"""
-    return API_KEYS[attempt_index % len(API_KEYS)]
-
-
-def backoff_with_jitter(attempt: int) -> float:
-    """Exponential backoff with jitter"""
-    base = min(2**attempt, MAX_BACKOFF)
-    jitter = base * 0.2 * (random.random() * 2 - 1)
-    return max(0.1, base + jitter)
-
-
-def validate_token_limits(prompt: str, max_output_tokens: int) -> Tuple[bool, str]:
-    """Validate that prompt and expected output are within token limits"""
-    # Rough estimation: 1 token ≈ 3-4 characters for mixed languages
-    estimated_input_tokens = len(prompt) // 3
-
-    if estimated_input_tokens > MAX_INPUT_TOKENS:
-        return False, f"Input tokens ({estimated_input_tokens}) exceed limit ({MAX_INPUT_TOKENS})"
-
-    if max_output_tokens > MAX_OUTPUT_TOKENS:
-        return False, f"Output tokens ({max_output_tokens}) exceed limit ({MAX_OUTPUT_TOKENS})"
-
-    return True, "OK"
-
-
-def extract_text(response):
-    """Extract text from response candidates properly"""
-    if not response.candidates:
-        return None
-
-    candidate = response.candidates[0]
-
-    # Check if content exists and has parts
-    if not hasattr(candidate, 'content') or not candidate.content:
-        return None
-
-    if not hasattr(candidate.content, 'parts') or not candidate.content.parts:
-        return None
-
-    parts = candidate.content.parts
-    texts = []
-    for p in parts:
-        if hasattr(p, "text") and p.text:
-            texts.append(p.text)
-
-    return "\n".join(texts) if texts else None
-
-
 def _verify_schema():
     """Simplified JSON Schema without additionalProperties"""
     return {
@@ -222,6 +199,7 @@ def _verify_schema():
             "required": ["id", "verdict", "explanation", "reference"]
         }
     }
+
 
 def _build_verify_prompt(items: List[Dict], lang: str) -> str:
     """Build concise verification prompt"""
@@ -242,35 +220,23 @@ def _build_verify_prompt(items: List[Dict], lang: str) -> str:
             + json.dumps(items, ensure_ascii=False)
         )
 
+
 def send_verify_request(model_name: str, api_key: str, items: List[Dict], lang: str, attempt: int) -> List[Dict]:
     """Send structured verification request using Google GenAI SDK"""
     try:
-        if USE_NEW_SDK:
-            client = genai.Client(api_key=api_key)
-            prompt_text = _build_verify_prompt(items, lang)
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt_text,
-                config=types.GenerateContentConfig(
-                    temperature=0.0,
-                    max_output_tokens=VERIFICATION_OUTPUT_TOKENS,
-                    response_mime_type="application/json",
-                    response_schema=_verify_schema()
-                )
+        client = genai.Client(api_key=api_key)
+        prompt_text = _build_verify_prompt(items, lang)
+
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt_text,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=VERIFICATION_OUTPUT_TOKENS,
+                response_mime_type="application/json",
+                response_schema=_verify_schema()
             )
-        else:
-            # Fallback to old SDK
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(model_name)
-            prompt_text = _build_verify_prompt(items, lang)
-            response = model.generate_content(
-                prompt_text,
-                generation_config=genai.GenerationConfig(
-                    temperature=0.0,
-                    max_output_tokens=VERIFICATION_OUTPUT_TOKENS,
-                    response_mime_type="application/json"
-                )
-            )
+        )
 
         # Save raw response for debugging
         raw_path = save_raw_response(response, f"verify_{model_name}", attempt)
@@ -358,7 +324,6 @@ def robust_parse_json_array(text: str) -> Optional[List[Dict]]:
     text = text.strip()
 
     # Remove all markdown blocks
-    import re
     text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
     text = re.sub(r'```\s*$', '', text, flags=re.MULTILINE)
 
@@ -433,48 +398,11 @@ def create_manual_review_item(candidate_id: str, claim: str,
     return review_file
 
 
-# Updated verifier prompt to be more strict and reduce fabrication
-VERIFIER_PROMPT = '''
-You are a fact verification system. You must output ONLY valid JSON, without markdown, without explanations, without comments.
-
-CRITICAL RULES:
-1. If the provided context does not contain enough information to decide, set "verdict": "Unknown" and leave "explanation" empty
-2. Never invent, hallucate, or rephrase information not explicitly present in the context
-3. Always copy exact phrases from the provided context when filling fields
-4. Only set verdict="True" if the claim is LITERALLY present or can be directly inferred from the context
-5. If you cannot find explicit evidence, use verdict="False" or "Unknown"
-
-Output format - ONLY JSON array, no markdown blocks:
-[
-  {
-    "id": "copy_from_input",
-    "language": "copy_from_input",
-    "claim": "copy_from_input",
-    "context_chunk_id": copy_number_from_input,
-    "context_excerpt": "copy_from_input",
-    "verdict": "True|False|Unknown",
-    "explanation": "brief_reasoning_or_empty_if_unknown",
-    "reference": "exact_text_from_context_or_UNKNOWN",
-    "suspected_fabrication": true_if_false_or_unknown,
-    "generator_model": "local",
-    "raw_response_path": "",
-    "meta": {"confidence": 0.1_to_1.0}
-  }
-]
-'''
-
-
-def prepare_verifier_request(items: List[Dict], max_tokens: int) -> str:
-    """Prepare verification request with language-specific prompts - DEPRECATED"""
-    # This function is now deprecated as we use structured output
-    language = items[0].get("language", "en") if items else "en"
-    return _build_verify_prompt(items, language)
-
-
 def chunked(lst, n):
     """Split list into chunks of size n"""
     for i in range(0, len(lst), n):
         yield lst[i:i+n]
+
 
 def batch_verify(items: List[Dict]) -> List[Dict]:
     """Batch verify items using structured output with 5-item chunks"""
@@ -490,7 +418,6 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
     # Split into small chunks of 5 items to prevent MAX_TOKENS
     ITEMS_PER_CALL = 5
     all_results = []
-    last_err = None
 
     for chunk in chunked(items, ITEMS_PER_CALL):
         for attempt in range(1, MAX_RETRIES + 1):
@@ -542,7 +469,6 @@ def batch_verify(items: List[Dict]) -> List[Dict]:
                 break  # Success, exit retry loop
 
             except Exception as e:
-                last_err = e
                 logger.error(f"Verification chunk failed, attempt {attempt}: {str(e)}")
 
                 if attempt == MAX_RETRIES:
@@ -579,7 +505,6 @@ def batch_verify_single(items: List[Dict]) -> List[Dict]:
     return results
 
 
-# Production-ready GeminiClient class
 class GeminiClient:
     """Production-ready Gemini client with load balancing and failover"""
 
@@ -590,9 +515,8 @@ class GeminiClient:
         self.current_key_index = 0
         self.models = self._load_models()
         self.key_manager = APIKeyManager(self.api_keys) if self.api_keys else None
-        
+
         # Initialize key state tracking
-        import threading
         self.lock = threading.Lock()
         self.key_states = {}
         current_time = int(time.time())
@@ -601,10 +525,6 @@ class GeminiClient:
                 "blocked_until": current_time,
                 "requests_made": 0
             }
-
-        # Configure the primary key
-        if self.api_keys:
-            genai.configure(api_key=self.api_keys[0])
 
         logger.info(f"Loaded {len(self.api_keys)} unique API keys")
         logger.info(f"Loaded {len(self.models)} models from config: {list(self.models.keys())}")
@@ -618,9 +538,9 @@ class GeminiClient:
         try:
             with open(self.config_path, "r") as f:
                 config = json.load(f)
-                keys = config.get("api_keys", [])
+                keys = config.get("API_KEYS", [])
                 if not isinstance(keys, list):
-                    logger.error("Invalid 'api_keys' format in config file.")
+                    logger.error("Invalid 'API_KEYS' format in config file.")
                     return []
                 # Ensure keys are unique and not empty
                 unique_keys = list(set(k for k in keys if k and isinstance(k, str)))
@@ -659,25 +579,23 @@ class GeminiClient:
         """Generate safe filename for raw responses"""
         ts = int(time.time() * 1000)
         model_safe = re.sub(r'[^A-Za-z0-9_.-]', '_', model)
-        return f"raw/{ts}_{model_safe}.resp.json.gz"
+        return f"raw/{ts}_{model_safe}.resp.json"
 
-    def _save_raw_response(self, prompt, response_text, model_name, finish_reason=None):
+    def _save_raw_response(self, response_obj, prompt, attempt):
         """Save raw response to file for debugging"""
-        filename = self._safe_filename("resp", model_name)
+        filename = self._safe_filename("resp", "model")
 
         try:
             os.makedirs("raw", exist_ok=True)
-            response_obj = {
+            response_data = {
                 "prompt": prompt[:1000],  # Limited prompt for reference
-                "response": response_text,
-                "model": model_name,
+                "response": str(response_obj),
                 "timestamp": time.time(),
-                "finish_reason": finish_reason
+                "attempt": attempt
             }
 
-            import gzip
-            with gzip.open(filename, "wt", encoding="utf-8") as f:
-                json.dump(response_obj, f, ensure_ascii=False, indent=2)
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(response_data, f, ensure_ascii=False, indent=2)
             return filename
         except Exception as e:
             logger.warning(f"Failed to save raw response: {e}")
@@ -687,14 +605,14 @@ class GeminiClient:
         """Get next available API key"""
         with self.lock:
             current_time = int(time.time())
-            
+
             # Try to find an available key
             for i in range(len(self.api_keys)):
                 key_index = (self.current_key_index + i) % len(self.api_keys)
                 if self.key_states[key_index]["blocked_until"] <= current_time:
                     self.current_key_index = (key_index + 1) % len(self.api_keys)
                     return self.api_keys[key_index], key_index
-            
+
             # No available keys
             return None, None
 
@@ -705,24 +623,18 @@ class GeminiClient:
             self.key_states[key_index]["blocked_until"] = block_until
             logger.warning(f"Blocked key {key_index} until {block_until}")
 
-
     def call_model(self,
                    prompt: str,
                    model: str = "gemini-2.5-flash",
                    max_tokens: int = 40000,
                    temperature: float = 0.0,
-                   max_attempts: int = 3,
-                   auto_retry_truncation: bool = True) -> Dict:
+                   max_attempts: int = 3) -> Dict:
         """Call Gemini model using Google GenAI SDK"""
 
         # Use available models from config
-        available_models = MODELS + [
-            "gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"
-        ]
+        available_models = MODELS + ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
         if model not in available_models:
-            logger.warning(
-                f"Model {model} not in available list, using first available model"
-            )
+            logger.warning(f"Model {model} not in available list, using first available model")
             model = available_models[0]
 
         for attempt in range(max_attempts):
@@ -736,39 +648,24 @@ class GeminiClient:
                 }
 
             try:
-                if USE_NEW_SDK:
-                    client = genai.Client(api_key=key)
+                client = genai.Client(api_key=key)
 
-                    # Check input token estimate
-                    estimated_input_tokens = len(prompt) // 3  # Rough estimate
-                    if estimated_input_tokens > MAX_INPUT_TOKENS:
-                        logger.warning(f"Input tokens ({estimated_input_tokens}) may exceed limit ({MAX_INPUT_TOKENS})")
+                # Check input token estimate
+                estimated_input_tokens = len(prompt) // 3  # Rough estimate
+                if estimated_input_tokens > MAX_INPUT_TOKENS:
+                    logger.warning(f"Input tokens ({estimated_input_tokens}) may exceed limit ({MAX_INPUT_TOKENS})")
 
-                    start_time = time.time()
-                    response = client.models.generate_content(
-                        model=model,
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            temperature=temperature,
-                            max_output_tokens=min(max_tokens, MAX_OUTPUT_TOKENS),
-                            response_mime_type="application/json"
-                        )
+                start_time = time.time()
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=temperature,
+                        max_output_tokens=min(max_tokens, MAX_OUTPUT_TOKENS),
+                        response_mime_type="application/json"
                     )
-                    latency = time.time() - start_time
-                else:
-                    # Fallback to old SDK
-                    genai.configure(api_key=key)
-                    model_instance = genai.GenerativeModel(model)
-
-                    start_time = time.time()
-                    response = model_instance.generate_content(
-                        prompt,
-                        generation_config=genai.GenerationConfig(
-                            temperature=temperature,
-                            max_output_tokens=min(max_tokens, MAX_OUTPUT_TOKENS)
-                        )
-                    )
-                    latency = time.time() - start_time
+                )
+                latency = time.time() - start_time
 
                 # Handle response with new SDK format
                 text_content = None
@@ -779,29 +676,17 @@ class GeminiClient:
                     finish_reason = getattr(candidate, 'finish_reason', None)
                     if finish_reason and finish_reason != 'STOP':
                         # Handle MAX_TOKENS with smart retry
-                        if "MAX_TOKENS" in str(finish_reason).upper() and auto_retry_truncation and attempt < max_attempts - 1:
+                        if "MAX_TOKENS" in str(finish_reason).upper() and attempt < max_attempts - 1:
                             if max_tokens < MAX_OUTPUT_TOKENS:
                                 new_max_tokens = min(MAX_OUTPUT_TOKENS, max_tokens * 2)
                                 logger.info(f"Truncated - increasing max_output_tokens from {max_tokens} to {new_max_tokens}")
                                 # Use the current key and retry with increased tokens
-                                return self.call_model(prompt, model, new_max_tokens, temperature, max_attempts, auto_retry_truncation)
-                            else:                               logger.warning("Truncated even at maximum allowed tokens - consider splitting request")</error_str>
-
-                        error_msg = f"Model finished with reason: {finish_reason}. Response may be incomplete or blocked."
-                        self.logger.warning(error_msg)</old_str>
-<new_str>                            if max_tokens < MAX_OUTPUT_TOKENS:
-                                new_max_tokens = min(MAX_OUTPUT_TOKENS, max_tokens * 2)
-                                logger.info(f"Truncated - increasing max_output_tokens from {max_tokens} to {new_max_tokens}")
-                                # Use the current key and retry with increased tokens
-                                return self.call_model(prompt, model, new_max_tokens, temperature, max_attempts, auto_retry_truncation)
+                                return self.call_model(prompt, model, new_max_tokens, temperature, max_attempts)
                             else:
                                 logger.warning("Truncated even at maximum allowed tokens - consider splitting request")
 
                         error_msg = f"Model finished with reason: {finish_reason}. Response may be incomplete or blocked."
                         logger.warning(error_msg)
-
-                        error_msg = f"Model finished with reason: {finish_reason}. Response may be incomplete or blocked."
-                        self.logger.warning(error_msg)
                         raw_path = self._save_raw_response(response, prompt, attempt)
 
                         # If it's truncation, still return partial content if available
@@ -821,13 +706,12 @@ class GeminiClient:
                 if not text_content and hasattr(response, 'text'):
                     text_content = response.text
 
-
                 # Update key state
                 with self.lock:
                     self.key_states[key_index]["requests_made"] += 1
 
                 raw_path = self._save_raw_response(response, prompt, attempt)
-                response_text = text_content or "" # Use extracted text or fallback
+                response_text = text_content or ""  # Use extracted text or fallback
 
                 return {
                     "success": True,
@@ -839,14 +723,13 @@ class GeminiClient:
                 }
 
             except Exception as e:
-                logger.error(
-                    f"Error with key {key_index}, attempt {attempt + 1}: {e}")
+                logger.error(f"Error with key {key_index}, attempt {attempt + 1}: {e}")
 
                 # Save error details for analysis
                 error_data = {
                     "error": str(e),
                     "model": model,
-                    "prompt": prompt[:200] + "...", # Log truncated prompt
+                    "prompt": prompt[:200] + "...",  # Log truncated prompt
                     "attempt": attempt,
                     "timestamp": time.time(),
                     "key_index": key_index
@@ -858,11 +741,7 @@ class GeminiClient:
                 if "quota" in error_str or "exhausted" in error_str or "429" in error_str or "rate limit" in error_str:
                     self._block_key(key_index, 600)  # Block for 10 minutes
                 elif "safety" in error_str:
-                    logger.warning(
-                        f"Safety filter triggered for model {model}")
-                # If it's not a transient error, don't retry immediately
-                elif "max_tokens" in error_str or "incomplete" in error_str:
-                    pass # Let it proceed to max attempts if it's a truncation/incompleteness issue handled within the loop
+                    logger.warning(f"Safety filter triggered for model {model}")
 
                 if attempt < max_attempts - 1:
                     wait_time = backoff_with_jitter(attempt)
@@ -882,12 +761,10 @@ class GeminiClient:
             current_time = int(time.time())
             status = {}
             for i, key in enumerate(self.api_keys):
-                masked_key = key[:8] + "..." + key[-4:] if len(
-                    key) > 12 else "***"
+                masked_key = key[:8] + "..." + key[-4:] if len(key) > 12 else "***"
                 status[f"key_{i}"] = {
                     "masked_key": masked_key,
-                    "available": self.key_states[i]["blocked_until"]
-                    <= current_time,
+                    "available": self.key_states[i]["blocked_until"] <= current_time,
                     "blocked_until": self.key_states[i]["blocked_until"],
                     "requests_made": self.key_states[i]["requests_made"]
                 }
