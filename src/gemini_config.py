@@ -17,8 +17,8 @@ if config_file.exists():
     BATCH_SIZE = config.get("BATCH_SIZE", 4)
     CONTEXT_MAX_CHARS = config.get("CONTEXT_MAX_CHARS", 3000)
     MAX_INPUT_TOKENS = config.get("MAX_INPUT_TOKENS", 900000)  # Gemini 2.5 safe limit
-    MAX_OUTPUT_TOKENS = config.get("MAX_OUTPUT_TOKENS", 8000)  # Safe chunk size
-    VERIFICATION_OUTPUT_TOKENS = config.get("VERIFICATION_OUTPUT_TOKENS", 2000)
+    MAX_OUTPUT_TOKENS = config.get("MAX_OUTPUT_TOKENS", 60000)  # Safe chunk size
+    VERIFICATION_OUTPUT_TOKENS = config.get("VERIFICATION_OUTPUT_TOKENS", 20000)
     TOKEN_ESTIMATE_CHAR_PER_TOKEN = config.get("TOKEN_ESTIMATE_CHAR_PER_TOKEN", 4)
     MAX_RETRIES = config.get("MAX_RETRIES", 5)
     VERIFIER_MODEL = config.get("VERIFIER_MODEL", "gemini-2.5-flash")
@@ -37,7 +37,7 @@ else:
     SINGLE_MODEL_FALLBACK = os.getenv("SINGLE_MODEL_FALLBACK")
     MAX_FABRICATION_RATE = float(os.getenv("MAX_FABRICATION_RATE", "0.10"))
     BATCH_SIZE = int(os.getenv("BATCH_SIZE", "4"))
-    CONTEXT_MAX_CHARS = int(os.getenv("CONTEXT_MAX_CHARS", "800"))
+    CONTEXT_MAX_CHARS = int(os.getenv("CONTEXT_MAX_CHARS", "8000"))
     MAX_INPUT_TOKENS = int(os.getenv("MAX_INPUT_TOKENS", "60000"))
     MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "40000"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
